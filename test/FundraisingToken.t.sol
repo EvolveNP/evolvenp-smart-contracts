@@ -13,14 +13,6 @@ contract FundraisingTokenTest is Test {
     uint256 public initialSupply = 1000 * 10 ** 18;
 
     function setUp() public {
-        token = new FundRaisingToken(
-            "FundRaisingToken",
-            "FRT",
-            18,
-            lpManager,
-            treasury,
-            initialSupply
-        );
+        token = new FundRaisingToken("FundRaisingToken", "FRT", 18, lpManager, treasury, initialSupply);
     }
-
 }

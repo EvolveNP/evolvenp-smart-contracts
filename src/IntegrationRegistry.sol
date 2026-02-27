@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.8.26;
+
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IEmergencyManager} from "./interface/IEmergencyManager.sol";
+
+contract IntegrationRegistry is Ownable {
+    enum Endpoint {
+        ROUTER,
+        PERMIT2,
+        QUOTER,
+        POOL_MANAGER,
+        POSITION_MANAGER,
+        STATE_VIEW,
+        EMERGENCY_MANAGER
+    }
+
+    error ZeroAddress();
+    error EmergencyIsNotActive();
+    error NoCodeAtAddress();
+
+    address public routerAddress; // The address of the uniswap universal router
+    address public permit2; // The address of the uniswap permit2 contract
+    address public quoterAddress; // Ther address of the uniswap v4 quoter
+    address public poolManager; // The address of the uniswap v4 pool manager
+    address public positionManager; // The address of the uniswap v4 position manager
+    address public stateView; // The address of the uniswap v4 state view
+    address public emergencyManager; // The address of the emergency manager contract
+
+    mapping(Endpoint => mapping(bytes32 => bool)) public isAllowedCodehash; // Mapping to track allowed function selectors for each integration type
+
+    event AllowListConfigured(Endpoint endpointType, bytes32 codehash, bool allowed);
+    event IntegrationUpdated(Endpoint endpointType, address oldAddress, address newAddress);
+
+    modifier nonZeroAddress(address _address) {
+        if (_address == address(0)) revert ZeroAddress();
+        _;
+    }
+
+    constructor(
+        address _routerAddress,
+        address _permit2,
+        address _quoterAddress,
+        address _poolManager,
+        address _positionManager,
+        address _stateView,
+        address _emergencyManager
+    )
+        Ownable(msg.sender)
+        nonZeroAddress(_routerAddress)
+        nonZeroAddress(_permit2)
+        nonZeroAddress(_quoterAddress)
+        nonZeroAddress(_poolManager)
+        nonZeroAddress(_positionManager)
+        nonZeroAddress(_stateView)
+        nonZeroAddress(_emergencyManager)
+    {
+        routerAddress = _routerAddress;
+        permit2 = _permit2;
+        quoterAddress = _quoterAddress;
+        poolManager = _poolManager;
+        positionManager = _positionManager;
+        stateView = _stateView;
+        emergencyManager = _emergencyManager;
+    }
+
+    function updateIntegrationAddress(Endpoint endpoint, address newAddress)
+        external
+        onlyOwner
+        nonZeroAddress(newAddress)
+    {
+        if (newAddress.code.length == 0) revert NoCodeAtAddress();
+        if (!isAllowedCodehash[endpoint][newAddress.codehash]) revert NoCodeAtAddress();
+        if (!IEmergencyManager(emergencyManager).isEmergencyActive()) revert EmergencyIsNotActive();
+        address currentAddress;
+        if (endpoint == Endpoint.ROUTER) {
+            currentAddress = routerAddress;
+            routerAddress = newAddress;
+        } else if (endpoint == Endpoint.PERMIT2) {
+            currentAddress = permit2;
+            permit2 = newAddress;
+        } else if (endpoint  == Endpoint.QUOTER) {
+            currentAddress = quoterAddress;
+            quoterAddress = newAddress;
+        } else if (endpoint == Endpoint.POOL_MANAGER) {
+            currentAddress = poolManager;
+            poolManager = newAddress;
+        } else if (endpoint == Endpoint.POSITION_MANAGER) {
+            currentAddress = positionManager;
+            positionManager = newAddress;
+        } else if (endpoint == Endpoint.STATE_VIEW) {
+            currentAddress = stateView;
+            stateView = newAddress;
+        } else if (endpoint == Endpoint.EMERGENCY_MANAGER) {
+            currentAddress = emergencyManager;
+            emergencyManager = newAddress;
+        }
+
+        emit IntegrationUpdated(endpoint, currentAddress, newAddress);
+    }
+
+    function setAllowedCodehash(Endpoint endpoint, bytes32 codehash, bool allowed) external onlyOwner {
+        isAllowedCodehash[endpoint][codehash] = allowed;
+        emit AllowListConfigured(endpoint, codehash, allowed);
+    }
+}

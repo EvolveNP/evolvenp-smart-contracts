@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.26;
+import {IEmergencyManager} from "./interface/IEmergencyManager.sol";
 
-contract EmergencyManager {
-    enum EmergencyState {
-        NORMAL, // default operation mode
-        ARMED, // Objective emergency conditions have been detected on-chain
-        ACTIVE // Emergency window is open
-    }
+contract EmergencyManager is IEmergencyManager {
+    error NotZeroValue();
 
     uint256 public emergencyWindowDuration; // Duration of the emergency window in seconds
     uint256 public emergencyWindowStart; // Timestamp when the emergency window starts
-    EmergencyState public emergencyState; // Current state of the emergency
+    EmergencyState internal emergencyState; // Current state of the emergency
 
     uint256 public maxLivelinessDelay; // Maximum allowed delay for liveliness checks in seconds
 
@@ -20,6 +17,20 @@ contract EmergencyManager {
     uint256 public oracleFailureCount; // Counter for oracle failures
     uint256 public endpointFailureCount; // Counter for endpoint failures
     uint256 public internalInvariantFailureCount; // Counter for internal invariant failures
+
+    modifier nonZeroValue(uint256 value) {
+        if (value == 0) revert NotZeroValue();
+        _;
+    }
+
+    constructor(uint256 _emergencyWindowDuration, uint256 _maxLivelinessDelay)
+        nonZeroValue(_emergencyWindowDuration)
+        nonZeroValue(_maxLivelinessDelay)
+    {
+        emergencyWindowDuration = _emergencyWindowDuration;
+        maxLivelinessDelay = _maxLivelinessDelay;
+        emergencyState = EmergencyState.NORMAL;
+    }
 
     function checkLivelinessFailure() external {
         livelinessFailureCount++;
@@ -51,5 +62,20 @@ contract EmergencyManager {
 
     function checkInternalInvariantFailure() external {
         internalInvariantFailureCount++;
+    }
+
+    function isEmergencyActive() public view returns (bool) {
+        if (emergencyState == EmergencyState.ACTIVE) {
+            return true;
+        }
+        // TODO: check this
+        if (emergencyState == EmergencyState.ARMED && block.timestamp >= emergencyWindowStart) {
+            return true;
+        }
+        return false;
+    }
+
+    function mode() external view returns (EmergencyState) {
+        return emergencyState;
     }
 }

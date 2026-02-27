@@ -79,7 +79,7 @@ contract IntegrationRegistry is Ownable {
         } else if (endpoint == Endpoint.PERMIT2) {
             currentAddress = permit2;
             permit2 = newAddress;
-        } else if (endpoint  == Endpoint.QUOTER) {
+        } else if (endpoint == Endpoint.QUOTER) {
             currentAddress = quoterAddress;
             quoterAddress = newAddress;
         } else if (endpoint == Endpoint.POOL_MANAGER) {

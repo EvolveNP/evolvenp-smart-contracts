@@ -1,6 +1,18 @@
 [profile.default]
+evm_version = "cancun"
 src = "src"
 out = "out"
 libs = ["lib"]
+solc_version = "0.8.26"
+via_ir = true
+optimizer = true
+
+fs_permissions = [{ access = "read-write", path = "./" }]
+
+[rpc_endpoints]
+sepolia = "${SEPOLIA_RPC_URL}"
+ 
+[etherscan]
+sepolia = { key = "${ETHERSCAN_API_KEY}" }
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

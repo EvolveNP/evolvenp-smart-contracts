@@ -4,3 +4,10 @@
 [submodule "lib/openzeppelin-contracts"]
 	path = lib/openzeppelin-contracts
 	url = https://github.com/OpenZeppelin/openzeppelin-contracts
+[submodule "lib/v4-periphery-truncated.git"]
+	path = lib/v4-periphery-truncated.git
+	url = https://github.com/Addis-Belete/v4-periphery-truncated.git
+	branch = trunc-oracle
+[submodule "lib/uniswap-hooks"]
+	path = lib/uniswap-hooks
+	url = https://github.com/OpenZeppelin/uniswap-hooks

@@ -15,7 +15,7 @@ import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.so
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IStateView} from "v4-periphery/src/interfaces/IStateView.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {TruncatedOracle} from "@uniswap/v4-periphery-trunc/contracts/libraries/TruncatedOracle.sol";
+import {TruncatedOracle} from "@uniswap/v4-periphery-trunc/libraries/TruncatedOracle.sol";
 
 /**
  * @title FundraisingTokenHook
@@ -410,8 +410,9 @@ contract FundraisingTokenHook is BaseHook {
      * @return bool Returns `true` if tax should be incurred, otherwise `false`.
      */
     function checkIfTaxIncurred(address sender) internal view returns (bool) {
-        return !ITreasury(treasuryAddress).isTreasuryPaused() && (getTreasuryBalanceInPerecent() < maximumThreshold)
-            && sender != treasuryAddress && sender != donationAddress;
+        return
+            (getTreasuryBalanceInPerecent() < maximumThreshold) && sender != treasuryAddress
+                && sender != donationAddress;
     }
 
     function getMsgSender(address sender) internal view returns (address) {

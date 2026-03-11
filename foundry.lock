@@ -10,5 +10,17 @@
       "name": "v5.5.0",
       "rev": "fcbae5394ae8ad52d8e580a3477db99814b9d565"
     }
+  },
+  "lib/uniswap-hooks": {
+    "tag": {
+      "name": "v1.2.1",
+      "rev": "acbd604c409a827f7f98c9517236da860c4fca1a"
+    }
+  },
+  "lib/v4-periphery-truncated.git": {
+    "branch": {
+      "name": "trunc-oracle",
+      "rev": "2a25dae90d75e68195129951b244c9e3fd1bdd8c"
+    }
   }
 }

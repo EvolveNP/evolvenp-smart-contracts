@@ -1,10 +1,14 @@
-@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
-@uniswap/v4-core/=lib/v4-core/
-@uniswap/v4-periphery/=lib/v4-periphery/
-@uniswap/permit2/=lib/permit2/
-@uniswap/universal-router/=lib/universal-router/
-@uniswap/v3-core/=lib/v3-core/
-@uniswap/v2-core/=lib/v2-core/
 
-@prb-math/=lib/prb-math/src/
-@uniswap/v4-periphery-trunc/=lib/v4-periphery-truncated
+@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
+@uniswap/v4-core/=lib/uniswap-hooks/lib/v4-core/
+@uniswap/v4-periphery/=lib/uniswap-hooks/lib/v4-periphery/
+
+forge-std/=lib/forge-std/src/
+
+openzeppelin-contracts/=lib/openzeppelin-contracts/
+permit2/=lib/uniswap-hooks/lib/v4-periphery/lib/permit2/
+solmate/=lib/uniswap-hooks/lib/v4-core/lib/solmate/
+
+v4-core/=lib/uniswap-hooks/lib/v4-core/src/
+@uniswap/v4-periphery-trunc/=lib/v4-periphery-truncated.git/contracts/
+v4-periphery/=lib/uniswap-hooks/lib/v4-periphery/

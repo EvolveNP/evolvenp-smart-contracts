@@ -12,11 +12,11 @@ interface IIntegrationRegistry {
         EMERGENCY_MANAGER
     }
 
-    function routerAddress() external view returns (address);
+    function router() external view returns (address);
 
     function permit2() external view returns (address);
 
-    function quoterAddress() external view returns (address);
+    function quoter() external view returns (address);
 
     function poolManager() external view returns (address);
 

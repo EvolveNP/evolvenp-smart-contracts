@@ -19,9 +19,9 @@ contract IntegrationRegistry is Ownable {
     error EmergencyIsNotActive();
     error NoCodeAtAddress();
 
-    address public routerAddress; // The address of the uniswap universal router
+    address public router; // The address of the uniswap universal router
     address public permit2; // The address of the uniswap permit2 contract
-    address public quoterAddress; // Ther address of the uniswap v4 quoter
+    address public quoter; // The address of the uniswap v4 quoter
     address public poolManager; // The address of the uniswap v4 pool manager
     address public positionManager; // The address of the uniswap v4 position manager
     address public stateView; // The address of the uniswap v4 state view
@@ -38,26 +38,26 @@ contract IntegrationRegistry is Ownable {
     }
 
     constructor(
-        address _routerAddress,
+        address _router,
         address _permit2,
-        address _quoterAddress,
+        address _quoter,
         address _poolManager,
         address _positionManager,
         address _stateView,
         address _emergencyManager
     )
         Ownable(msg.sender)
-        nonZeroAddress(_routerAddress)
+        nonZeroAddress(_router)
         nonZeroAddress(_permit2)
-        nonZeroAddress(_quoterAddress)
+        nonZeroAddress(_quoter)
         nonZeroAddress(_poolManager)
         nonZeroAddress(_positionManager)
         nonZeroAddress(_stateView)
         nonZeroAddress(_emergencyManager)
     {
-        routerAddress = _routerAddress;
+        router = _router;
         permit2 = _permit2;
-        quoterAddress = _quoterAddress;
+        quoter = _quoter;
         poolManager = _poolManager;
         positionManager = _positionManager;
         stateView = _stateView;
@@ -74,14 +74,14 @@ contract IntegrationRegistry is Ownable {
         if (!IEmergencyManager(emergencyManager).isEmergencyActive()) revert EmergencyIsNotActive();
         address currentAddress;
         if (endpoint == Endpoint.ROUTER) {
-            currentAddress = routerAddress;
-            routerAddress = newAddress;
+            currentAddress = router;
+            router = newAddress;
         } else if (endpoint == Endpoint.PERMIT2) {
             currentAddress = permit2;
             permit2 = newAddress;
         } else if (endpoint == Endpoint.QUOTER) {
-            currentAddress = quoterAddress;
-            quoterAddress = newAddress;
+            currentAddress = quoter;
+            quoter = newAddress;
         } else if (endpoint == Endpoint.POOL_MANAGER) {
             currentAddress = poolManager;
             poolManager = newAddress;

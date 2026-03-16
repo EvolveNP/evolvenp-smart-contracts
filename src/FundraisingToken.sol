@@ -4,12 +4,12 @@ pragma solidity 0.8.26;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /**
- * @title FundRaisingToken
+ * @title FundraisingToken
  * @notice ERC20 Fundraising token.
  *         Initial supply is minted to the liquidity pool manager and treasury wallet.
  * @dev Tokens can be burned only by the treasury wallet to reduce supply.
  */
-contract FundRaisingToken is ERC20 {
+contract FundraisingToken is ERC20 {
     /**
      * Errors
      */

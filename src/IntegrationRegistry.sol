@@ -2,7 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {IEmergencyManager} from "./interface/IEmergencyManager.sol";
+import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 
 contract IntegrationRegistry is Ownable {
     enum Endpoint {

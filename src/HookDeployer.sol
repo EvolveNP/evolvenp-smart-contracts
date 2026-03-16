@@ -2,11 +2,11 @@
 pragma solidity 0.8.26;
 
 import {FundraisingTokenHook} from "./FundraisingTokenHook.sol";
-import {IFactory} from "./interface/IFactory.sol";
+import {IFactory} from "./interfaces/IFactory.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {IIntegrationRegistry} from "./interface/IIntegrationRegistry.sol";
+import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 
 contract HookDeployer is Ownable {
     IFactory public factory;

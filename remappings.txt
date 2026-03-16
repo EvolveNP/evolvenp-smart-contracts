@@ -12,3 +12,4 @@ solmate/=lib/uniswap-hooks/lib/v4-core/lib/solmate/
 v4-core/=lib/uniswap-hooks/lib/v4-core/src/
 @uniswap/v4-periphery-trunc/=lib/v4-periphery-truncated.git/contracts/
 v4-periphery/=lib/uniswap-hooks/lib/v4-periphery/
+@prb/math/=lib/prb-math/

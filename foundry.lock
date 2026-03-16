@@ -11,6 +11,12 @@
       "rev": "fcbae5394ae8ad52d8e580a3477db99814b9d565"
     }
   },
+  "lib/prb-math": {
+    "branch": {
+      "name": "release-v4",
+      "rev": "b51e8631ed28d3cc917c491dd47cd6c3ff652edc"
+    }
+  },
   "lib/uniswap-hooks": {
     "tag": {
       "name": "v1.2.1",

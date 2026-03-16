@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IEmergencyManager} from "./interface/IEmergencyManager.sol";
+import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 
 contract Vault {
     /**

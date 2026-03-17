@@ -12,20 +12,14 @@ contract MockOracleFeed {
     uint256 internal updatedAt;
     uint80 internal answeredInRound;
 
-    function setRoundData(uint80 _roundId, int256 _answer, uint256 _updatedAt, uint80 _answeredInRound)
-        external
-    {
+    function setRoundData(uint80 _roundId, int256 _answer, uint256 _updatedAt, uint80 _answeredInRound) external {
         roundId = _roundId;
         answer = _answer;
         updatedAt = _updatedAt;
         answeredInRound = _answeredInRound;
     }
 
-    function latestRoundData()
-        external
-        view
-        returns (uint80, int256, uint256, uint256, uint80)
-    {
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
         return (roundId, answer, 0, updatedAt, answeredInRound);
     }
 }
@@ -131,8 +125,7 @@ contract EmergencyManagerTest is Test {
         address[] memory feeds = new address[](0);
 
         EmergencyManager.EndpointConfig[] memory endpoints = new EmergencyManager.EndpointConfig[](1);
-        endpoints[0] =
-            EmergencyManager.EndpointConfig({endpoint: missingEndpoint, allowedCodehashes: new bytes32[](0)});
+        endpoints[0] = EmergencyManager.EndpointConfig({endpoint: missingEndpoint, allowedCodehashes: new bytes32[](0)});
 
         EmergencyManager.Config memory config = EmergencyManager.Config({
             emergencyDuration: 1 days,
@@ -148,8 +141,7 @@ contract EmergencyManagerTest is Test {
             enforceEndpointCodehash: false
         });
 
-        EmergencyManager missingCodeManager =
-            new EmergencyManager(multisig, reporters, config, feeds, endpoints);
+        EmergencyManager missingCodeManager = new EmergencyManager(multisig, reporters, config, feeds, endpoints);
 
         bool armed = missingCodeManager.checkEndpoint(missingEndpoint);
 

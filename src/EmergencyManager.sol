@@ -66,7 +66,7 @@ contract EmergencyManager is IEmergencyManager {
 
     EmergencyState internal emergencyState;
     uint256 public emergencyExpiresAt;
-    uint256 public  lastSuccessAt;
+    uint256 public lastSuccessAt;
     uint256 public armedReasonFlags;
 
     uint64 public oracleFailureCount;
@@ -210,10 +210,7 @@ contract EmergencyManager is IEmergencyManager {
         _recordFailure(quoteFailures, quoteFailureWindow);
         if (
             (quoteFailureThreshold != 0 && quoteFailures.consecutive >= quoteFailureThreshold)
-                || (
-                    quoteFailuresInWindowThreshold != 0
-                        && quoteFailures.inWindow >= quoteFailuresInWindowThreshold
-                )
+                || (quoteFailuresInWindowThreshold != 0 && quoteFailures.inWindow >= quoteFailuresInWindowThreshold)
         ) {
             _armEmergency(TRIGGER_QUOTE_FAILURE, address(0), bytes32(0));
         }
@@ -227,10 +224,7 @@ contract EmergencyManager is IEmergencyManager {
         _recordFailure(swapFailures, swapFailureWindow);
         if (
             (swapFailureThreshold != 0 && swapFailures.consecutive >= swapFailureThreshold)
-                || (
-                    swapFailuresInWindowThreshold != 0
-                        && swapFailures.inWindow >= swapFailuresInWindowThreshold
-                )
+                || (swapFailuresInWindowThreshold != 0 && swapFailures.inWindow >= swapFailuresInWindowThreshold)
         ) {
             _armEmergency(TRIGGER_SWAP_FAILURE, address(0), bytes32(0));
         }
@@ -251,7 +245,6 @@ contract EmergencyManager is IEmergencyManager {
 
     function recordInvariantViolation(bytes32 invariantId, uint256 lhs, uint256 rhs, bool expectedLte)
         external
-        
         onlyReporter
         syncBefore
     {

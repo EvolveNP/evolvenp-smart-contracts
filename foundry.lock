@@ -20,12 +20,6 @@
       "rev": "b51e8631ed28d3cc917c491dd47cd6c3ff652edc"
     }
   },
-  "lib/uniswap-hooks": {
-    "tag": {
-      "name": "v1.2.1",
-      "rev": "acbd604c409a827f7f98c9517236da860c4fca1a"
-    }
-  },
   "lib/universal-router": {
     "tag": {
       "name": "v1.6.0",

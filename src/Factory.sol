@@ -135,7 +135,8 @@ contract Factory is IFactory, Ownable {
             20,
             _emergencyManager,
             _registryAddress,
-            1000 * 10 ** _decimals //TODO
+            1000 * 10 ** _decimals, //TODO
+            address(this)
         );
 
         protocols[_owner] = FundraisingProtocol(
@@ -277,6 +278,10 @@ contract Factory is IFactory, Ownable {
 
     function getProtocol(address _owner) external view returns (FundraisingProtocol memory) {
         return protocols[_owner];
+    }
+
+    function getPoolKeys(address _owner) external view returns(PoolKey memory) {
+        return poolKeys[_owner];
     }
 
     /**

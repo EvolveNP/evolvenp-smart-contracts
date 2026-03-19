@@ -7,6 +7,7 @@ import {Swap} from "./abstracts/Swap.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IFactory} from "./interfaces/IFactory.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IHook} from "./interfaces/IHook.sol";
 
 contract Vault is Swap {
     using SafeERC20 for IERC20;
@@ -18,6 +19,7 @@ contract Vault is Swap {
     error InsufficientBalance();
     error UnsafePrice();
     error TransferFailed();
+    error NotFactory();
 
     address public immutable fundraisingToken; // The address of the fundraising token
     address public immutable underlyingAsset; // The address of the underlying asset
@@ -28,6 +30,9 @@ contract Vault is Swap {
     address public emergencyManager; // The address of the emergency manager contract
     uint256 public immutable minTokenBalanceToExecute;
     address public immutable factoryAddress;
+    address public hookAddress;
+    uint32 public constant oracleObservationInterval = 1800; // Oracle observation interval in seconds -> 30 mins
+    int24 public constant maxTickDeviation = 198; // Maximum tick deviation for swaps 2%
 
     /**
      * @notice This event is used to log successful transfers to non-profit organizations.
@@ -36,6 +41,11 @@ contract Vault is Swap {
      * @dev Emitted when funds are transferred to a non-profit recipient.
      */
     event FundsTransferredToNonProfit(address recipient, uint256 amount);
+
+    modifier onlyFactory() {
+        if (msg.sender != factoryAddress) revert NotFactory();
+        _;
+    }
 
     constructor(
         address _fundraisingToken,
@@ -61,7 +71,7 @@ contract Vault is Swap {
         if (IEmergencyManager(emergencyManager).isEmergencyActive()) revert EmegerncyIsActive();
         if (block.timestamp < lastSuccessAt + intervalSeconds) revert NotDue();
         if (IERC20(fundraisingToken).balanceOf(address(this)) < minTokenBalanceToExecute) revert InsufficientBalance();
-        if (!TWAPCheck()) revert UnsafePrice();
+        if (!shouldAllowSell()) revert UnsafePrice();
     }
 
     function isDue() external view returns (bool) {
@@ -97,20 +107,51 @@ contract Vault is Swap {
         uint256 amountOut =
             swapExactInputSingle(key, uint128(amountIn), uint128(minAmountOut), isCurrency0FundraisingToken);
 
-        if (currency0 == address(0)) {
-            (bool success,) = owner.call{value: amountOut}("");
-            if (!success) revert TransferFailed();
-        } else {
-            isCurrency0FundraisingToken
-                ? IERC20(currency1).safeTransfer(owner, amountOut)
-                : IERC20(currency0).safeTransfer(owner, amountOut);
-        }
+        isCurrency0FundraisingToken
+            ? IERC20(currency1).safeTransfer(owner, amountOut)
+            : IERC20(currency0).safeTransfer(owner, amountOut);
+
         emit FundsTransferredToNonProfit(owner, amountOut);
     }
 
-    function TWAPCheck() internal pure returns (bool) {
-        // This function would contain logic to check the Time-Weighted Average Price (TWAP) of the underlying asset.
-        // It would interact with the quoter or state view contract to get price data and determine if the price conditions are favorable for executing the monthly event.
+    function shouldAllowSell() public view returns (bool) {
+        address owner = address(20); //TODO change with split with beneficiries
+        IHook hook = IHook(hookAddress);
+        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(owner);
+
+        uint32 interval = oracleObservationInterval;
+
+        uint32[] memory secondsAgos = new uint32[](2);
+        secondsAgos[0] = interval;
+        secondsAgos[1] = 0;
+
+        (int48[] memory tickCumulatives,) = hook.observe(key, secondsAgos);
+
+        int56 tickDelta = int56(tickCumulatives[1]) - int56(tickCumulatives[0]);
+
+        int24 avgTick = int24(tickDelta / int56(uint56(interval)));
+
+        int24 currentTick = hook.getCurrentTick(key);
+
+        bool fundraisingIsToken0 = Currency.unwrap(key.currency0) == address(fundraisingToken);
+
+        if (fundraisingIsToken0) {
+            // FundraisingToken DOWN too much → block
+            if (avgTick - currentTick > maxTickDeviation) {
+                return false;
+            }
+        } else {
+            // FundraisingToken DOWN too much → block
+            if (currentTick - avgTick > maxTickDeviation) {
+                return false;
+            }
+        }
+
+        // UP, SAME, or small dip → allowed
         return true;
+    }
+
+    function setHookAddress(address _hookAddress) external onlyFactory {
+        hookAddress = _hookAddress;
     }
 }

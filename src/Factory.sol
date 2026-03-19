@@ -280,7 +280,7 @@ contract Factory is IFactory, Ownable {
         return protocols[_owner];
     }
 
-    function getPoolKeys(address _owner) external view returns(PoolKey memory) {
+    function getPoolKeys(address _owner) external view returns (PoolKey memory) {
         return poolKeys[_owner];
     }
 

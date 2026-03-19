@@ -16,6 +16,7 @@ contract FundraisingToken is ERC20 {
     error ZeroAddress();
     error ZeroAmount();
     error OnlyTreasury();
+    error SameAddress();
 
     /**
      * State Variables
@@ -43,14 +44,6 @@ contract FundraisingToken is ERC20 {
     }
 
     /**
-     * @notice Modifier to restrict function access only to the treasury wallet.
-     */
-    modifier onlyTreasury() {
-        if (msg.sender != treasuryAddress) revert OnlyTreasury();
-        _;
-    }
-
-    /**
      * @notice Constructs the FundRaisingToken contract.
      * @param name The name of the token.
      * @param symbol The symbol of the token.
@@ -68,6 +61,7 @@ contract FundraisingToken is ERC20 {
         address _treasuryAddress,
         uint256 _totalSupply
     ) ERC20(name, symbol) nonZeroAddress(_lpManager) nonZeroAddress(_treasuryAddress) nonZeroAmount(_totalSupply) {
+        if (_lpManager == _treasuryAddress) revert SameAddress();
         lpManager = _lpManager;
         treasuryAddress = _treasuryAddress;
         _decimals = decimals_;
@@ -76,15 +70,6 @@ contract FundraisingToken is ERC20 {
         _mint(lpManager, (_totalSupply * 75e16) / 1e18);
         // mint 25% to treasury wallet
         _mint(treasuryAddress, (_totalSupply * 25e16) / 1e18);
-    }
-
-    /**
-     * @notice Burns a specified amount of tokens from the treasury wallet.
-     * @param amount The amount of tokens to burn.
-     * @dev Only callable by the treasury wallet.
-     */
-    function burn(uint256 amount) external nonZeroAmount(amount) onlyTreasury {
-        _burn(msg.sender, amount);
     }
 
     /**

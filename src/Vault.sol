@@ -23,7 +23,7 @@ contract Vault is Swap {
     error NoBeneficiaries();
     error ZeroSwapAmount();
 
-    address public immutable fundraisingToken; // The address of the fundraising token
+    address public fundraisingToken; // The address of the fundraising token
     address public immutable underlyingAsset; // The address of the underlying asset
     uint256 public immutable intervalSeconds;
     uint256 public lastSuccessAt; // Timestamp of the last successful operation
@@ -50,7 +50,6 @@ contract Vault is Swap {
     }
 
     constructor(
-        address _fundraisingToken,
         address _underlyingAsset,
         uint256 _intervalSeconds,
         address[] memory _beneficiaries,
@@ -60,7 +59,6 @@ contract Vault is Swap {
         uint256 _minTokenBalanceToExecute,
         address _factoryAddress
     ) Swap(_integrationRegistry) {
-        fundraisingToken = _fundraisingToken;
         underlyingAsset = _underlyingAsset;
         intervalSeconds = _intervalSeconds;
         beneficiaries = _beneficiaries;
@@ -171,5 +169,9 @@ contract Vault is Swap {
 
     function setHookAddress(address _hookAddress) external onlyFactory {
         hookAddress = _hookAddress;
+    }
+
+    function setFundraisingToken(address _fundraisingToken) external onlyFactory {
+        fundraisingToken = _fundraisingToken;
     }
 }

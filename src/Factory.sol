@@ -50,13 +50,9 @@ contract Factory is IFactory, Ownable {
      *  @notice Emitted when a new fundraising vault is created.
      * @dev Contains the fundraising token, treasury wallet, donation wallet, and owner addresses.
      * @param fundraisingToken The address of the fundraising token.
-     * @param treasuryWallet The address of the treasury wallet.
-     * @param donationWallet The address of the donation wallet.
-     * @param owner The address of the owner.
+     * @param vault The address of the vault.
      */
-    event FundraisingVaultCreated(
-        address fundraisingToken, address treasuryWallet, address donationWallet, address owner
-    );
+    event FundraisingVaultCreated(address fundraisingToken, address vault);
 
     /**
      *  @notice Emitted when a new liquidity pool is created.
@@ -110,7 +106,8 @@ contract Factory is IFactory, Ownable {
         address[] memory _beneficiaries,
         uint256 _intervalSeconds,
         uint256 _swapPercentage,
-        uint256 _minTokenBalanceToExecute
+        uint256 _minTokenBalanceToExecute,
+        uint256 _totalSupply
     ) external nonZeroAddress(_owner) onlyOwner {
         if (protocols[_owner].fundraisingToken != address(0)) {
             revert VaultAlreadyExists();
@@ -119,14 +116,9 @@ contract Factory is IFactory, Ownable {
 
         uint8 _decimals = IERC20Metadata(usdcAddress).decimals();
 
-        // Deploy fundraising token
-        FundraisingToken fundraisingToken =
-            new FundraisingToken(_tokenName, _tokenSymbol, _decimals, owner(), address(20), 1e9 * 10 ** _decimals);
-
         address _registryAddress = registryAddress;
         address _emergencyManager = emergencyManagerAddress;
         Vault vault = new Vault(
-            address(fundraisingToken),
             _underlyingAddress,
             _intervalSeconds,
             _beneficiaries,
@@ -137,10 +129,18 @@ contract Factory is IFactory, Ownable {
             address(this)
         );
 
-        protocols[_owner] =
-            FundraisingProtocol(address(fundraisingToken), _underlyingAddress, address(vault), _owner, false);
+        // Deploy fundraising token
+        FundraisingToken fundraisingToken = new FundraisingToken(
+            _tokenName, _tokenSymbol, _decimals, owner(), address(vault), _totalSupply * 10 ** _decimals
+        );
 
-        emit FundraisingVaultCreated(address(fundraisingToken), address(30), address(20), _owner);
+        // set fundraising token addrress in vault
+        vault.setFundraisingToken(address(fundraisingToken));
+
+        protocols[address(fundraisingToken)] =
+            FundraisingProtocol(address(fundraisingToken), _underlyingAddress, address(vault), address(0), false);
+
+        emit FundraisingVaultCreated(address(fundraisingToken), address(vault));
     }
 
     /**

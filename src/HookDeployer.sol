@@ -40,15 +40,14 @@ contract HookDeployer is Ownable {
     function deployHook(
         address poolManager,
         address fundraisingToken,
-        address treasuryWallet,
-        address donationWallet,
+        address vault,
         address router,
         address quoter,
         address stateView,
         bytes32 salt
     ) external onlyFactory returns (address) {
         FundraisingTokenHook hook = new FundraisingTokenHook{salt: salt}(
-            poolManager, fundraisingToken, treasuryWallet, donationWallet, router, quoter, stateView
+            poolManager, fundraisingToken, vault, router, quoter, stateView
         );
         return address(hook);
     }
@@ -84,15 +83,8 @@ contract HookDeployer is Ownable {
         address stateView = integrationRegistry.stateView();
         address poolManager = integrationRegistry.poolManager();
         // Mine a salt that will produce a hook address with the correct flags
-        bytes memory constructorArgs = abi.encode(
-            poolManager,
-            protocol.fundraisingToken,
-            protocol.treasuryWallet,
-            protocol.donationWallet,
-            router,
-            quoter,
-            stateView
-        );
+        bytes memory constructorArgs =
+            abi.encode(poolManager, protocol.fundraisingToken, protocol.vault, router, quoter, stateView);
         (, bytes32 salt) =
             HookMiner.find(address(this), flags, type(FundraisingTokenHook).creationCode, constructorArgs);
         return salt;

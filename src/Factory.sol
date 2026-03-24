@@ -137,9 +137,8 @@ contract Factory is IFactory, Ownable {
             address(this)
         );
 
-        protocols[_owner] = FundraisingProtocol(
-            address(fundraisingToken), _underlyingAddress, address(vault), address(30), address(0), _owner, false
-        );
+        protocols[_owner] =
+            FundraisingProtocol(address(fundraisingToken), _underlyingAddress, address(vault), _owner, false);
 
         emit FundraisingVaultCreated(address(fundraisingToken), address(30), address(20), _owner);
     }
@@ -194,7 +193,7 @@ contract Factory is IFactory, Ownable {
         bytes[] memory params = new bytes[](2);
 
         FundraisingProtocol storage _protocol = protocols[_owner];
-        if (_protocol.fundraisingToken == address(0) || _protocol.treasuryWallet == address(0)) {
+        if (_protocol.fundraisingToken == address(0) || _protocol.vault == address(0)) {
             revert FundraisingVaultNotCreated();
         }
         if (_protocol.isLPCreated) revert PoolAlreadyExists();
@@ -221,14 +220,7 @@ contract Factory is IFactory, Ownable {
 
         // deploy hook
         address hook = hookDeployer.deployHook(
-            poolManager,
-            _protocol.fundraisingToken,
-            _protocol.treasuryWallet,
-            _protocol.donationWallet,
-            router,
-            quoter,
-            stateView,
-            _salt
+            poolManager, _protocol.fundraisingToken, _protocol.vault, router, quoter, stateView, _salt
         );
 
         // transfer assets to this contract;

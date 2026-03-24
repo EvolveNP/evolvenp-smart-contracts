@@ -6,10 +6,8 @@ interface IFactory {
     struct FundraisingProtocol {
         address fundraisingToken; // The address of the fundraising token
         address underlyingAddress; // The address of the underlying token (e.g., USDC, ETH)
-        address treasuryWallet; // the address of the treasury wallet
-        address donationWallet; // the address of the donation wallet
+        address vault; // the address of the treasury wallet
         address hook; // The address of the hook
-        address owner; // the non profit org wallet address
         bool isLPCreated; // whether the lp is created or not
     }
 

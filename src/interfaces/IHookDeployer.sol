@@ -5,8 +5,7 @@ interface IHookDeployer {
     function deployHook(
         address poolManager,
         address fundraisingToken,
-        address treasuryWallet,
-        address donationWallet,
+        address vault,
         address router,
         address quoter,
         address stateView,

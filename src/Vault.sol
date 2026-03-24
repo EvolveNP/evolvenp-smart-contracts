@@ -32,7 +32,6 @@ contract Vault is Swap {
     address public emergencyManager; // The address of the emergency manager contract
     uint256 public immutable minTokenBalanceToExecute; //
     address public immutable factoryAddress;
-    address public immutable protocolOwner;
     address public hookAddress;
     uint32 public constant oracleObservationInterval = 1800; // Oracle observation interval in seconds -> 30 mins
     int24 public constant maxTickDeviation = 198; // Maximum tick deviation for swaps 2%
@@ -59,8 +58,7 @@ contract Vault is Swap {
         address _integrationRegistry,
         address _emergencyManager,
         uint256 _minTokenBalanceToExecute,
-        address _factoryAddress,
-        address _protocolOwner
+        address _factoryAddress
     ) Swap(_integrationRegistry) {
         fundraisingToken = _fundraisingToken;
         underlyingAsset = _underlyingAsset;
@@ -70,7 +68,6 @@ contract Vault is Swap {
         emergencyManager = _emergencyManager;
         minTokenBalanceToExecute = _minTokenBalanceToExecute;
         factoryAddress = _factoryAddress;
-        protocolOwner = _protocolOwner;
     }
 
     function executeMonthlyEvent() external {
@@ -107,7 +104,7 @@ contract Vault is Swap {
         uint256 amountIn = (tokenBalance * swapPercentage) / 1e18;
         if (amountIn == 0) revert ZeroSwapAmount();
 
-        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(protocolOwner);
+        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(fundraisingToken);
 
         address currency0 = Currency.unwrap(key.currency0);
         bool isCurrency0FundraisingToken = currency0 == address(fundraisingToken);
@@ -119,7 +116,7 @@ contract Vault is Swap {
 
     function shouldAllowSell() public view returns (bool) {
         IHook hook = IHook(hookAddress);
-        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(protocolOwner);
+        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(fundraisingToken);
 
         uint32 interval = oracleObservationInterval;
 

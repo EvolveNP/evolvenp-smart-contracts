@@ -132,11 +132,12 @@ contract Factory is IFactory, Ownable {
             _underlyingAddress,
             30,
             _beneficiaries,
-            20,
-            _emergencyManager,
+            20e16,
             _registryAddress,
+            _emergencyManager,
             1000 * 10 ** _decimals, //TODO
-            address(this)
+            address(this),
+            _owner
         );
 
         protocols[_owner] = FundraisingProtocol(

@@ -20,6 +20,8 @@ contract Vault is Swap {
     error UnsafePrice();
     error TransferFailed();
     error NotFactory();
+    error NoBeneficiaries();
+    error ZeroSwapAmount();
 
     address public immutable fundraisingToken; // The address of the fundraising token
     address public immutable underlyingAsset; // The address of the underlying asset
@@ -28,8 +30,9 @@ contract Vault is Swap {
     address[] public beneficiaries;
     uint256 public swapPercentage; // The percentage of the swap in 18 decimals (e.g., 500000000000000000 for 50%)
     address public emergencyManager; // The address of the emergency manager contract
-    uint256 public immutable minTokenBalanceToExecute;
+    uint256 public immutable minTokenBalanceToExecute; //
     address public immutable factoryAddress;
+    address public immutable protocolOwner;
     address public hookAddress;
     uint32 public constant oracleObservationInterval = 1800; // Oracle observation interval in seconds -> 30 mins
     int24 public constant maxTickDeviation = 198; // Maximum tick deviation for swaps 2%
@@ -56,7 +59,8 @@ contract Vault is Swap {
         address _integrationRegistry,
         address _emergencyManager,
         uint256 _minTokenBalanceToExecute,
-        address _factoryAddress
+        address _factoryAddress,
+        address _protocolOwner
     ) Swap(_integrationRegistry) {
         fundraisingToken = _fundraisingToken;
         underlyingAsset = _underlyingAsset;
@@ -65,6 +69,8 @@ contract Vault is Swap {
         swapPercentage = _swapPercentage;
         emergencyManager = _emergencyManager;
         minTokenBalanceToExecute = _minTokenBalanceToExecute;
+        factoryAddress = _factoryAddress;
+        protocolOwner = _protocolOwner;
     }
 
     function executeMonthlyEvent() external {
@@ -72,12 +78,16 @@ contract Vault is Swap {
         if (block.timestamp < lastSuccessAt + intervalSeconds) revert NotDue();
         if (IERC20(fundraisingToken).balanceOf(address(this)) < minTokenBalanceToExecute) revert InsufficientBalance();
         if (!shouldAllowSell()) revert UnsafePrice();
+
+        uint256 amountOut = swapFundraisingToken();
+        _distributeProceeds(amountOut);
+        lastSuccessAt = block.timestamp;
     }
 
     function isDue() external view returns (bool) {
         if (
             block.timestamp >= lastSuccessAt + intervalSeconds
-                && IEmergencyManager(emergencyManager).isEmergencyActive()
+                && !IEmergencyManager(emergencyManager).isEmergencyActive()
                 && IERC20(fundraisingToken).balanceOf(address(this)) >= minTokenBalanceToExecute
         ) return true;
         return false;
@@ -92,32 +102,24 @@ contract Vault is Swap {
      *
      * Emits a {FundsTransferredToNonProfit} event indicating the owner and amount transferred.
      */
-    function swapFundraisingToken() internal {
-        address owner = address(20); //TODO change with split with beneficiries
-        uint256 amountIn = IERC20(fundraisingToken).balanceOf(address(this));
+    function swapFundraisingToken() internal returns (uint256 amountOut) {
+        uint256 tokenBalance = IERC20(fundraisingToken).balanceOf(address(this));
+        uint256 amountIn = (tokenBalance * swapPercentage) / 1e18;
+        if (amountIn == 0) revert ZeroSwapAmount();
 
-        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(owner);
+        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(protocolOwner);
 
         address currency0 = Currency.unwrap(key.currency0);
-        address currency1 = Currency.unwrap(key.currency1);
         bool isCurrency0FundraisingToken = currency0 == address(fundraisingToken);
 
         uint256 minAmountOut = getMinAmountOut(key, isCurrency0FundraisingToken, uint128(amountIn), bytes(""));
 
-        uint256 amountOut =
-            swapExactInputSingle(key, uint128(amountIn), uint128(minAmountOut), isCurrency0FundraisingToken);
-
-        isCurrency0FundraisingToken
-            ? IERC20(currency1).safeTransfer(owner, amountOut)
-            : IERC20(currency0).safeTransfer(owner, amountOut);
-
-        emit FundsTransferredToNonProfit(owner, amountOut);
+        amountOut = swapExactInputSingle(key, uint128(amountIn), uint128(minAmountOut), isCurrency0FundraisingToken);
     }
 
     function shouldAllowSell() public view returns (bool) {
-        address owner = address(20); //TODO change with split with beneficiries
         IHook hook = IHook(hookAddress);
-        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(owner);
+        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(protocolOwner);
 
         uint32 interval = oracleObservationInterval;
 
@@ -149,6 +151,25 @@ contract Vault is Swap {
 
         // UP, SAME, or small dip → allowed
         return true;
+    }
+
+    function _distributeProceeds(uint256 amountOut) internal {
+        uint256 beneficiaryCount = beneficiaries.length;
+        if (beneficiaryCount == 0) revert NoBeneficiaries();
+
+        uint256 amountPerBeneficiary = amountOut / beneficiaryCount;
+        uint256 remainder = amountOut % beneficiaryCount;
+
+        for (uint256 i; i < beneficiaryCount; ++i) {
+            uint256 payout = amountPerBeneficiary;
+            if (i == beneficiaryCount - 1) {
+                payout += remainder;
+            }
+            // Only USDC supproted
+            IERC20(underlyingAsset).safeTransfer(beneficiaries[i], payout);
+
+            emit FundsTransferredToNonProfit(beneficiaries[i], payout);
+        }
     }
 
     function setHookAddress(address _hookAddress) external onlyFactory {

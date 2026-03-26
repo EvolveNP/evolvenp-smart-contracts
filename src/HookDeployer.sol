@@ -37,18 +37,14 @@ contract HookDeployer is Ownable {
         integrationRegistry = IIntegrationRegistry(_integrationRegistryAddress);
     }
 
-    function deployHook(
-        address poolManager,
-        address fundraisingToken,
-        address vault,
-        address router,
-        address quoter,
-        address stateView,
-        bytes32 salt
-    ) external onlyFactory returns (address) {
-        FundraisingTokenHook hook = new FundraisingTokenHook{salt: salt}(
-            poolManager, fundraisingToken, vault, router, quoter, stateView
-        );
+    function deployHook(address fundraisingToken, address vault, bytes32 salt) external onlyFactory returns (address) {
+        address router = integrationRegistry.router();
+        address quoter = integrationRegistry.quoter();
+        address stateView = integrationRegistry.stateView();
+        address poolManager = integrationRegistry.poolManager();
+
+        FundraisingTokenHook hook =
+            new FundraisingTokenHook{salt: salt}(poolManager, fundraisingToken, vault, router, quoter, stateView);
         return address(hook);
     }
 

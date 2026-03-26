@@ -10,6 +10,7 @@ import {FundraisingToken} from "./FundraisingToken.sol";
 import {Vault} from "./Vault.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
+import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 import {Helper} from "./libraries/Helper.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IPoolInitializer_v4} from "@uniswap/v4-periphery/src/interfaces/IPoolInitializer_v4.sol";
@@ -28,6 +29,9 @@ contract Factory is IFactory, Ownable {
     error FundraisingVaultNotCreated();
     error PoolAlreadyExists();
     error UnsupportedUnderlyingAsset();
+    error OnlySelf();
+    error HookDeploymentFailed();
+    error PositionManagerCallFailed();
 
     address public immutable registryAddress;
     address public immutable emergencyManagerAddress;
@@ -85,6 +89,11 @@ contract Factory is IFactory, Ownable {
         _;
     }
 
+    modifier onlySelf() {
+        if (msg.sender != address(this)) revert OnlySelf();
+        _;
+    }
+
     constructor(address _registryAddress, address _emergencyManagerAddress, address _hookDeployer, address _usdcAddress)
         Ownable(msg.sender)
         nonZeroAddress(_registryAddress)
@@ -128,6 +137,7 @@ contract Factory is IFactory, Ownable {
             _minTokenBalanceToExecute,
             address(this)
         );
+        IEmergencyManager(_emergencyManager).setReporter(address(vault), true);
 
         // Deploy fundraising token
         FundraisingToken fundraisingToken = new FundraisingToken(
@@ -183,12 +193,7 @@ contract Factory is IFactory, Ownable {
         onlyOwner
     {
         address positionManager = IIntegrationRegistry(registryAddress).positionManager();
-        address router = IIntegrationRegistry(registryAddress).router();
-        address quoter = IIntegrationRegistry(registryAddress).quoter();
-        address stateView = IIntegrationRegistry(registryAddress).stateView();
-        address poolManager = IIntegrationRegistry(registryAddress).poolManager();
         address permit2 = IIntegrationRegistry(registryAddress).permit2();
-        IPositionManager _positionManager = IPositionManager(positionManager);
 
         bytes[] memory params = new bytes[](2);
 
@@ -219,9 +224,15 @@ contract Factory is IFactory, Ownable {
         Currency currency1 = Currency.wrap(_currency1);
 
         // deploy hook
-        address hook = hookDeployer.deployHook(
-            poolManager, _protocol.fundraisingToken, _protocol.vault, router, quoter, stateView, _salt
-        );
+        address hook;
+        try this.deployHookFromFactory(_protocol.fundraisingToken, _protocol.vault, _salt) returns (
+            address deployedHook
+        ) {
+            hook = deployedHook;
+        } catch {
+            _tryRecordEndpointFailure();
+            revert HookDeploymentFailed();
+        }
 
         // transfer assets to this contract;
 
@@ -249,7 +260,11 @@ contract Factory is IFactory, Ownable {
         // store pool key for easy access
         poolKeys[_protocol.fundraisingToken] = pool;
 
-        _positionManager.multicall(params);
+        try this.positionManagerMulticall(positionManager, params) {}
+        catch {
+            _tryRecordEndpointFailure();
+            revert PositionManagerCallFailed();
+        }
 
         emit LiquidityPoolCreated(_protocol.underlyingAddress, _protocol.fundraisingToken, _owner);
     }
@@ -301,5 +316,21 @@ contract Factory is IFactory, Ownable {
 
         return
             abi.encodeWithSelector(IPositionManager.modifyLiquidities.selector, abi.encode(actions, params), deadline);
+    }
+
+    function deployHookFromFactory(address fundraisingToken, address vault, bytes32 salt)
+        external
+        onlySelf
+        returns (address hook)
+    {
+        hook = hookDeployer.deployHook(fundraisingToken, vault, salt);
+    }
+
+    function positionManagerMulticall(address positionManager, bytes[] calldata params) external onlySelf {
+        IPositionManager(positionManager).multicall(params);
+    }
+
+    function _tryRecordEndpointFailure() internal {
+        try IEmergencyManager(emergencyManagerAddress).recordEndpointFailure() {} catch {}
     }
 }

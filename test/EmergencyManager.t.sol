@@ -6,70 +6,28 @@ import {Test} from "forge-std/Test.sol";
 import {EmergencyManager} from "../src/EmergencyManager.sol";
 import {IEmergencyManager} from "../src/interfaces/IEmergencyManager.sol";
 
-contract MockOracleFeed {
-    uint80 internal roundId;
-    int256 internal answer;
-    uint256 internal updatedAt;
-    uint80 internal answeredInRound;
-
-    function setRoundData(uint80 _roundId, int256 _answer, uint256 _updatedAt, uint80 _answeredInRound) external {
-        roundId = _roundId;
-        answer = _answer;
-        updatedAt = _updatedAt;
-        answeredInRound = _answeredInRound;
-    }
-
-    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
-        return (roundId, answer, 0, updatedAt, answeredInRound);
-    }
-}
-
-contract MockEndpoint {
-    function ping() external pure returns (bool) {
-        return true;
-    }
-}
-
 contract EmergencyManagerTest is Test {
     address internal multisig = address(0xA11CE);
+    address internal reporterRegistrar = address(0xFACADE);
     address internal reporter = address(0xB0B);
 
-    MockOracleFeed internal feed;
-    MockEndpoint internal endpoint;
     EmergencyManager internal manager;
 
     function setUp() public {
-        feed = new MockOracleFeed();
-        endpoint = new MockEndpoint();
-        feed.setRoundData(1, 1e8, block.timestamp, 1);
-
         address[] memory reporters = new address[](1);
         reporters[0] = reporter;
 
-        address[] memory feeds = new address[](1);
-        feeds[0] = address(feed);
-
-        bytes32[] memory allowedHashes = new bytes32[](1);
-        allowedHashes[0] = address(endpoint).codehash;
-
-        EmergencyManager.EndpointConfig[] memory endpoints = new EmergencyManager.EndpointConfig[](1);
-        endpoints[0] = EmergencyManager.EndpointConfig({endpoint: address(endpoint), allowedCodehashes: allowedHashes});
-
         EmergencyManager.Config memory config = EmergencyManager.Config({
             emergencyDuration: 3 days,
-            maxLivenessDelay: 30 days,
             quoteFailureThreshold: 2,
             quoteFailureWindow: 1 days,
             quoteFailuresInWindowThreshold: 3,
             swapFailureThreshold: 2,
             swapFailureWindow: 1 days,
-            swapFailuresInWindowThreshold: 3,
-            oracleMaxStaleness: 1 days,
-            reentrancyTripThreshold: 2,
-            enforceEndpointCodehash: true
+            swapFailuresInWindowThreshold: 3
         });
 
-        manager = new EmergencyManager(multisig, reporters, config, feeds, endpoints);
+        manager = new EmergencyManager(multisig, reporterRegistrar, reporters, config);
     }
 
     function testQuoteFailuresArmThenEmergencyExpiresToNormal() public {
@@ -95,63 +53,213 @@ contract EmergencyManagerTest is Test {
         assertEq(manager.armedReasonFlags(), 0);
     }
 
-    function testLivenessCheckArmsWhenExecutionIsOverdue() public {
-        vm.warp(block.timestamp + 30 days + 1);
+    function testSwapFailuresArmEmergency() public {
+        vm.startPrank(reporter);
+        manager.recordSwapFailure();
+        manager.recordSwapFailure();
+        vm.stopPrank();
 
-        bool armed = manager.checkLiveness();
-
-        assertTrue(armed);
         assertEq(uint256(manager.mode()), uint256(IEmergencyManager.EmergencyState.ARMED));
-        assertEq(manager.armedReasonFlags(), manager.TRIGGER_LIVENESS());
+        assertEq(manager.armedReasonFlags(), manager.TRIGGER_SWAP_FAILURE());
     }
 
-    function testOracleCheckArmsOnStaleData() public {
-        vm.warp(3 days);
-        feed.setRoundData(2, 1e8, block.timestamp - 2 days, 2);
+    function testEndpointFailureArmsEmergency() public {
+        vm.prank(reporter);
+        manager.recordEndpointFailure();
 
-        bool armed = manager.checkOracle(address(feed));
-
-        assertTrue(armed);
         assertEq(uint256(manager.mode()), uint256(IEmergencyManager.EmergencyState.ARMED));
-        assertEq(manager.armedReasonFlags(), manager.TRIGGER_ORACLE_INVALID());
-    }
-
-    function testEndpointCheckArmsWhenTrackedEndpointHasNoCode() public {
-        address missingEndpoint = address(0xCAFE);
-
-        address[] memory reporters = new address[](1);
-        reporters[0] = reporter;
-
-        address[] memory feeds = new address[](0);
-
-        EmergencyManager.EndpointConfig[] memory endpoints = new EmergencyManager.EndpointConfig[](1);
-        endpoints[0] = EmergencyManager.EndpointConfig({endpoint: missingEndpoint, allowedCodehashes: new bytes32[](0)});
-
-        EmergencyManager.Config memory config = EmergencyManager.Config({
-            emergencyDuration: 1 days,
-            maxLivenessDelay: 30 days,
-            quoteFailureThreshold: 2,
-            quoteFailureWindow: 1 days,
-            quoteFailuresInWindowThreshold: 3,
-            swapFailureThreshold: 2,
-            swapFailureWindow: 1 days,
-            swapFailuresInWindowThreshold: 3,
-            oracleMaxStaleness: 1 days,
-            reentrancyTripThreshold: 0,
-            enforceEndpointCodehash: false
-        });
-
-        EmergencyManager missingCodeManager = new EmergencyManager(multisig, reporters, config, feeds, endpoints);
-
-        bool armed = missingCodeManager.checkEndpoint(missingEndpoint);
-
-        assertTrue(armed);
-        assertEq(uint256(missingCodeManager.mode()), uint256(IEmergencyManager.EmergencyState.ARMED));
-        assertEq(missingCodeManager.armedReasonFlags(), missingCodeManager.TRIGGER_ENDPOINT_INTEGRITY());
+        assertEq(manager.armedReasonFlags(), manager.TRIGGER_ENDPOINT_FAILURE());
+        assertEq(manager.endpointFailureCount(), 1);
     }
 
     function testOnlyReporterCanRecordFailures() public {
         vm.expectRevert(EmergencyManager.NotAuthorizedReporter.selector);
         manager.recordSwapFailure();
+    }
+
+    function testReporterRegistrarCanAuthorizeVaultReporter() public {
+        address vault = address(0xCAFE);
+
+        vm.prank(reporterRegistrar);
+        manager.setReporter(vault, true);
+
+        assertTrue(manager.isReporter(vault));
+    }
+
+    function testOnlyReporterRegistrarCanAuthorizeVaultReporter() public {
+        vm.expectRevert(EmergencyManager.NotReporterRegistrar.selector);
+        manager.setReporter(address(0xCAFE), true);
+    }
+
+    function testConstructorRejectsZeroAddresses() public {
+        address[] memory reporters = new address[](0);
+        EmergencyManager.Config memory config = EmergencyManager.Config({
+            emergencyDuration: 3 days,
+            quoteFailureThreshold: 2,
+            quoteFailureWindow: 1 days,
+            quoteFailuresInWindowThreshold: 3,
+            swapFailureThreshold: 2,
+            swapFailureWindow: 1 days,
+            swapFailuresInWindowThreshold: 3
+        });
+
+        vm.expectRevert(EmergencyManager.ZeroAddress.selector);
+        new EmergencyManager(address(0), reporterRegistrar, reporters, config);
+
+        vm.expectRevert(EmergencyManager.ZeroAddress.selector);
+        new EmergencyManager(multisig, address(0), reporters, config);
+    }
+
+    function testConstructorRejectsZeroDurationAndZeroReporterInList() public {
+        address[] memory invalidReporters = new address[](1);
+        invalidReporters[0] = address(0);
+
+        EmergencyManager.Config memory invalidDuration = EmergencyManager.Config({
+            emergencyDuration: 0,
+            quoteFailureThreshold: 2,
+            quoteFailureWindow: 1 days,
+            quoteFailuresInWindowThreshold: 3,
+            swapFailureThreshold: 2,
+            swapFailureWindow: 1 days,
+            swapFailuresInWindowThreshold: 3
+        });
+
+        vm.expectRevert(EmergencyManager.InvalidState.selector);
+        new EmergencyManager(multisig, reporterRegistrar, new address[](0), invalidDuration);
+
+        EmergencyManager.Config memory validDuration = EmergencyManager.Config({
+            emergencyDuration: 3 days,
+            quoteFailureThreshold: 2,
+            quoteFailureWindow: 1 days,
+            quoteFailuresInWindowThreshold: 3,
+            swapFailureThreshold: 2,
+            swapFailureWindow: 1 days,
+            swapFailuresInWindowThreshold: 3
+        });
+
+        vm.expectRevert(EmergencyManager.ZeroAddress.selector);
+        new EmergencyManager(multisig, reporterRegistrar, invalidReporters, validDuration);
+    }
+
+    function testEmergencyMultisigIsReporterByDefault() public view {
+        assertTrue(manager.isReporter(multisig));
+    }
+
+    function testOnlyEmergencyMultisigCanActivateOrClose() public {
+        vm.prank(reporter);
+        manager.recordEndpointFailure();
+
+        vm.expectRevert(EmergencyManager.NotEmergencyMultisig.selector);
+        manager.activateEmergency();
+
+        vm.expectRevert(EmergencyManager.NotEmergencyMultisig.selector);
+        manager.closeEmergency();
+    }
+
+    function testActivateEmergencyRequiresArmedState() public {
+        vm.prank(multisig);
+        vm.expectRevert(EmergencyManager.InvalidState.selector);
+        manager.activateEmergency();
+    }
+
+    function testCloseEmergencyRequiresActiveState() public {
+        vm.prank(multisig);
+        vm.expectRevert(EmergencyManager.InvalidState.selector);
+        manager.closeEmergency();
+    }
+
+    function testCloseEmergencyResetsState() public {
+        vm.prank(reporter);
+        manager.recordEndpointFailure();
+
+        vm.prank(multisig);
+        manager.activateEmergency();
+
+        vm.prank(multisig);
+        manager.closeEmergency();
+
+        assertEq(uint256(manager.mode()), uint256(IEmergencyManager.EmergencyState.NORMAL));
+        assertEq(manager.armedReasonFlags(), 0);
+        assertEq(manager.endpointFailureCount(), 0);
+        assertEq(manager.emergencyExpiresAt(), 0);
+        (uint64 quoteConsecutive, uint64 quoteInWindow, uint64 quoteWindowStart) = manager.quoteFailures();
+        (uint64 swapConsecutive, uint64 swapInWindow, uint64 swapWindowStart) = manager.swapFailures();
+        assertEq(quoteConsecutive, 0);
+        assertEq(quoteInWindow, 0);
+        assertEq(quoteWindowStart, 0);
+        assertEq(swapConsecutive, 0);
+        assertEq(swapInWindow, 0);
+        assertEq(swapWindowStart, 0);
+    }
+
+    function testQuoteFailuresCanArmByWindowThreshold() public {
+        address[] memory reporters = new address[](1);
+        reporters[0] = reporter;
+
+        EmergencyManager.Config memory config = EmergencyManager.Config({
+            emergencyDuration: 3 days,
+            quoteFailureThreshold: 0,
+            quoteFailureWindow: 1 days,
+            quoteFailuresInWindowThreshold: 2,
+            swapFailureThreshold: 0,
+            swapFailureWindow: 1 days,
+            swapFailuresInWindowThreshold: 0
+        });
+
+        EmergencyManager windowManager = new EmergencyManager(multisig, reporterRegistrar, reporters, config);
+
+        vm.startPrank(reporter);
+        windowManager.recordQuoteFailure();
+        windowManager.recordQuoteFailure();
+        vm.stopPrank();
+
+        assertEq(uint256(windowManager.mode()), uint256(IEmergencyManager.EmergencyState.ARMED));
+        assertEq(windowManager.armedReasonFlags(), windowManager.TRIGGER_QUOTE_FAILURE());
+    }
+
+    function testSwapFailureWindowResetsAfterWindowExpires() public {
+        vm.prank(reporter);
+        manager.recordSwapFailure();
+
+        (uint64 consecutiveBefore, uint64 inWindowBefore,) = manager.swapFailures();
+        assertEq(consecutiveBefore, 1);
+        assertEq(inWindowBefore, 1);
+
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.prank(reporter);
+        manager.recordSwapFailure();
+
+        (uint64 consecutiveAfter, uint64 inWindowAfter, uint64 windowStartAfter) = manager.swapFailures();
+        assertEq(consecutiveAfter, 2);
+        assertEq(inWindowAfter, 1);
+        assertEq(windowStartAfter, uint64(block.timestamp));
+    }
+
+    function testArmedReasonFlagsAccumulateAcrossTriggerTypes() public {
+        vm.prank(reporter);
+        manager.recordEndpointFailure();
+
+        vm.startPrank(reporter);
+        manager.recordQuoteFailure();
+        manager.recordQuoteFailure();
+        vm.stopPrank();
+
+        uint256 expectedFlags = manager.TRIGGER_ENDPOINT_FAILURE() | manager.TRIGGER_QUOTE_FAILURE();
+        assertEq(manager.armedReasonFlags(), expectedFlags);
+    }
+
+    function testSetReporterRejectsZeroAddressAndCanDisableReporter() public {
+        vm.prank(reporterRegistrar);
+        vm.expectRevert(EmergencyManager.ZeroAddress.selector);
+        manager.setReporter(address(0), true);
+
+        vm.prank(reporterRegistrar);
+        manager.setReporter(reporter, false);
+        assertFalse(manager.isReporter(reporter));
+
+        vm.prank(reporter);
+        vm.expectRevert(EmergencyManager.NotAuthorizedReporter.selector);
+        manager.recordQuoteFailure();
     }
 }

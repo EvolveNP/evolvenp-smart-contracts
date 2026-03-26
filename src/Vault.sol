@@ -20,8 +20,12 @@ contract Vault is Swap {
     error UnsafePrice();
     error TransferFailed();
     error NotFactory();
+    error OnlySelf();
     error NoBeneficiaries();
     error ZeroSwapAmount();
+    error SellCheckFailed();
+    error QuoteFailed();
+    error SwapFailed();
 
     address public fundraisingToken; // The address of the fundraising token
     address public immutable underlyingAsset; // The address of the underlying asset
@@ -49,6 +53,11 @@ contract Vault is Swap {
         _;
     }
 
+    modifier onlySelf() {
+        if (msg.sender != address(this)) revert OnlySelf();
+        _;
+    }
+
     constructor(
         address _underlyingAsset,
         uint256 _intervalSeconds,
@@ -69,12 +78,37 @@ contract Vault is Swap {
     }
 
     function executeMonthlyEvent() external {
-        if (IEmergencyManager(emergencyManager).isEmergencyActive()) revert EmegerncyIsActive();
+        IEmergencyManager manager = IEmergencyManager(emergencyManager);
+
+        if (manager.isEmergencyActive()) revert EmegerncyIsActive();
         if (block.timestamp < lastSuccessAt + intervalSeconds) revert NotDue();
         if (IERC20(fundraisingToken).balanceOf(address(this)) < minTokenBalanceToExecute) revert InsufficientBalance();
-        if (!shouldAllowSell()) revert UnsafePrice();
+        bool shouldSell;
+        try this.checkShouldAllowSell() returns (bool allowed) {
+            shouldSell = allowed;
+        } catch {
+            _tryRecordEndpointFailure(manager);
+            revert SellCheckFailed();
+        }
+        if (!shouldSell) revert UnsafePrice();
 
-        uint256 amountOut = swapFundraisingToken();
+        uint256 amountIn = _getSwapAmountIn();
+        uint256 minAmountOut;
+        try this.quoteFundraisingTokenSwap(uint128(amountIn)) returns (uint256 quotedMinAmountOut) {
+            minAmountOut = quotedMinAmountOut;
+        } catch {
+            manager.recordQuoteFailure();
+            revert QuoteFailed();
+        }
+
+        uint256 amountOut;
+        try this.swapFundraisingToken(uint128(amountIn), uint128(minAmountOut)) returns (uint256 swappedAmountOut) {
+            amountOut = swappedAmountOut;
+        } catch {
+            manager.recordSwapFailure();
+            revert SwapFailed();
+        }
+
         _distributeProceeds(amountOut);
         lastSuccessAt = block.timestamp;
     }
@@ -97,19 +131,30 @@ contract Vault is Swap {
      *
      * Emits a {FundsTransferredToNonProfit} event indicating the owner and amount transferred.
      */
-    function swapFundraisingToken() internal returns (uint256 amountOut) {
-        uint256 tokenBalance = IERC20(fundraisingToken).balanceOf(address(this));
-        uint256 amountIn = (tokenBalance * swapPercentage) / 1e18;
-        if (amountIn == 0) revert ZeroSwapAmount();
-
+    function quoteFundraisingTokenSwap(uint128 amountIn) external onlySelf returns (uint256 minAmountOut) {
         PoolKey memory key = IFactory(factoryAddress).getPoolKeys(fundraisingToken);
+        bool isCurrency0FundraisingToken = Currency.unwrap(key.currency0) == address(fundraisingToken);
+        minAmountOut = getMinAmountOut(key, isCurrency0FundraisingToken, amountIn, bytes(""));
+    }
 
-        address currency0 = Currency.unwrap(key.currency0);
-        bool isCurrency0FundraisingToken = currency0 == address(fundraisingToken);
+    function swapFundraisingToken(uint128 amountIn, uint128 minAmountOut)
+        external
+        onlySelf
+        returns (uint256 amountOut)
+    {
+        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(fundraisingToken);
+        bool isCurrency0FundraisingToken = Currency.unwrap(key.currency0) == address(fundraisingToken);
+        amountOut = swapExactInputSingle(key, amountIn, minAmountOut, isCurrency0FundraisingToken);
+    }
 
-        uint256 minAmountOut = getMinAmountOut(key, isCurrency0FundraisingToken, uint128(amountIn), bytes(""));
+    function _getSwapAmountIn() internal view returns (uint256 amountIn) {
+        uint256 tokenBalance = IERC20(fundraisingToken).balanceOf(address(this));
+        amountIn = (tokenBalance * swapPercentage) / 1e18;
+        if (amountIn == 0) revert ZeroSwapAmount();
+    }
 
-        amountOut = swapExactInputSingle(key, uint128(amountIn), uint128(minAmountOut), isCurrency0FundraisingToken);
+    function checkShouldAllowSell() external view onlySelf returns (bool) {
+        return shouldAllowSell();
     }
 
     function shouldAllowSell() public view returns (bool) {
@@ -173,5 +218,9 @@ contract Vault is Swap {
 
     function setFundraisingToken(address _fundraisingToken) external onlyFactory {
         fundraisingToken = _fundraisingToken;
+    }
+
+    function _tryRecordEndpointFailure(IEmergencyManager manager) internal {
+        try manager.recordEndpointFailure() {} catch {}
     }
 }

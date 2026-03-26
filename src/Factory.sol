@@ -10,6 +10,7 @@ import {FundraisingToken} from "./FundraisingToken.sol";
 import {Vault} from "./Vault.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
+import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 import {Helper} from "./libraries/Helper.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IPoolInitializer_v4} from "@uniswap/v4-periphery/src/interfaces/IPoolInitializer_v4.sol";
@@ -128,6 +129,7 @@ contract Factory is IFactory, Ownable {
             _minTokenBalanceToExecute,
             address(this)
         );
+        IEmergencyManager(_emergencyManager).setReporter(address(vault), true);
 
         // Deploy fundraising token
         FundraisingToken fundraisingToken = new FundraisingToken(

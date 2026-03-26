@@ -137,7 +137,11 @@ contract Vault is Swap {
         minAmountOut = getMinAmountOut(key, isCurrency0FundraisingToken, amountIn, bytes(""));
     }
 
-    function swapFundraisingToken(uint128 amountIn, uint128 minAmountOut) external onlySelf returns (uint256 amountOut) {
+    function swapFundraisingToken(uint128 amountIn, uint128 minAmountOut)
+        external
+        onlySelf
+        returns (uint256 amountOut)
+    {
         PoolKey memory key = IFactory(factoryAddress).getPoolKeys(fundraisingToken);
         bool isCurrency0FundraisingToken = Currency.unwrap(key.currency0) == address(fundraisingToken);
         amountOut = swapExactInputSingle(key, amountIn, minAmountOut, isCurrency0FundraisingToken);

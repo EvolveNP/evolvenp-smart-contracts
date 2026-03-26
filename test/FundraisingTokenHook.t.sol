@@ -89,17 +89,20 @@ contract FundraisingTokenHookHarness is FundraisingTokenHook {
         return _afterInitialize(address(0), key, price, tick);
     }
 
-    function exposedBeforeAddLiquidity(PoolKey calldata key, ModifyLiquidityParams calldata params, bytes calldata hookData)
-        external
-        returns (bytes4)
-    {
+    function exposedBeforeAddLiquidity(
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata params,
+        bytes calldata hookData
+    ) external returns (bytes4) {
         return _beforeAddLiquidity(address(0), key, params, hookData);
     }
 
-    function exposedBeforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
-        external
-        returns (bytes4, BeforeSwapDelta, uint24)
-    {
+    function exposedBeforeSwap(
+        address sender,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        bytes calldata hookData
+    ) external returns (bytes4, BeforeSwapDelta, uint24) {
         return _beforeSwap(sender, key, params, hookData);
     }
 
@@ -109,10 +112,7 @@ contract FundraisingTokenHookHarness is FundraisingTokenHook {
         SwapParams calldata params,
         BalanceDelta delta,
         bytes calldata hookData
-    )
-        external
-        returns (bytes4, int128)
-    {
+    ) external returns (bytes4, int128) {
         return _afterSwap(sender, key, params, delta, hookData);
     }
 

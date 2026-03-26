@@ -120,11 +120,12 @@ contract FactoryHarness is Factory {
         Factory(registry, emergencyManager, hookDeployer, usdc)
     {}
 
-    function exposedGetModifyLiqiuidityParams(PoolKey memory key, uint256 amount0, uint256 amount1, uint160 startingPrice)
-        external
-        view
-        returns (bytes memory)
-    {
+    function exposedGetModifyLiqiuidityParams(
+        PoolKey memory key,
+        uint256 amount0,
+        uint256 amount1,
+        uint160 startingPrice
+    ) external view returns (bytes memory) {
         return getModifyLiqiuidityParams(key, amount0, amount1, startingPrice);
     }
 }
@@ -163,23 +164,31 @@ contract FactoryTest is Test {
     function testCreateFundraisingVaultOnlyOwner() public {
         vm.prank(thirdParty);
         vm.expectRevert();
-        factory.createFundraisingVault("Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+        factory.createFundraisingVault(
+            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
+        );
     }
 
     function testCreateFundraisingVaultRejectsInvalidInputs() public {
         vm.prank(protocolAdmin);
         vm.expectRevert(Factory.ZeroAddress.selector);
-        factory.createFundraisingVault("Fund", "FUND", address(usdc), address(0), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+        factory.createFundraisingVault(
+            "Fund", "FUND", address(usdc), address(0), _beneficiaries(), 30 days, 5e17, 1e6, 1000
+        );
 
         vm.prank(protocolAdmin);
         vm.expectRevert(Factory.UnsupportedUnderlyingAsset.selector);
-        factory.createFundraisingVault("Fund", "FUND", address(0x1234), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+        factory.createFundraisingVault(
+            "Fund", "FUND", address(0x1234), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
+        );
     }
 
     function testCreateFundraisingVaultDeploysVaultAndToken() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
-        factory.createFundraisingVault("Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+        factory.createFundraisingVault(
+            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
+        );
 
         (address fundraisingToken, address vault) = _decodeCreatedVault();
         assertTrue(fundraisingToken != address(0));
@@ -227,7 +236,9 @@ contract FactoryTest is Test {
     function testCreatePoolHappyPathStoresHookAndPoolKey() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
-        factory.createFundraisingVault("Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+        factory.createFundraisingVault(
+            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
+        );
 
         (address fundraisingToken,) = _decodeCreatedVault();
         hookDeployer.configure(fakeHook, false);
@@ -261,7 +272,9 @@ contract FactoryTest is Test {
     function testCreatePoolRevertsWhenHookDeploymentFails() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
-        factory.createFundraisingVault("Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+        factory.createFundraisingVault(
+            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
+        );
         (address fundraisingToken,) = _decodeCreatedVault();
 
         hookDeployer.configure(address(0), true);
@@ -278,7 +291,9 @@ contract FactoryTest is Test {
     function testCreatePoolRevertsWhenPositionManagerFails() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
-        factory.createFundraisingVault("Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+        factory.createFundraisingVault(
+            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
+        );
         (address fundraisingToken,) = _decodeCreatedVault();
 
         hookDeployer.configure(fakeHook, false);
@@ -296,7 +311,9 @@ contract FactoryTest is Test {
     function testCreatePoolRevertsWhenAlreadyCreated() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
-        factory.createFundraisingVault("Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+        factory.createFundraisingVault(
+            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
+        );
         (address fundraisingToken,) = _decodeCreatedVault();
 
         hookDeployer.configure(fakeHook, false);
@@ -351,13 +368,7 @@ contract FactoryTest is Test {
         revert("event not found");
     }
 
-    function _storeProtocol(
-        address key,
-        address underlying,
-        address vault,
-        address hook,
-        bool isCreated
-    ) internal {
+    function _storeProtocol(address key, address underlying, address vault, address hook, bool isCreated) internal {
         bytes32 slot = keccak256(abi.encode(key, uint256(1)));
         vm.store(address(factory), slot, bytes32(uint256(uint160(key))));
         vm.store(address(factory), bytes32(uint256(slot) + 1), bytes32(uint256(uint160(underlying))));

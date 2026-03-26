@@ -269,14 +269,7 @@ contract VaultTest is Test {
         oneBeneficiary[0] = beneficiaryA;
 
         Vault smallVault = new Vault(
-            address(usdc),
-            1 days,
-            oneBeneficiary,
-            1,
-            address(registry),
-            address(emergencyManager),
-            1,
-            address(factory)
+            address(usdc), 1 days, oneBeneficiary, 1, address(registry), address(emergencyManager), 1, address(factory)
         );
 
         vm.prank(address(factory));
@@ -293,8 +286,16 @@ contract VaultTest is Test {
     }
 
     function testExecuteMonthlyEventRevertsWithoutBeneficiaries() public {
-        Vault emptyVault =
-            new Vault(address(usdc), 1 days, new address[](0), 1e18, address(registry), address(emergencyManager), 1, address(factory));
+        Vault emptyVault = new Vault(
+            address(usdc),
+            1 days,
+            new address[](0),
+            1e18,
+            address(registry),
+            address(emergencyManager),
+            1,
+            address(factory)
+        );
 
         vm.prank(address(factory));
         emptyVault.setFundraisingToken(address(fundraisingToken));

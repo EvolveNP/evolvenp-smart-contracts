@@ -81,10 +81,17 @@ contract EmergencyManager is IEmergencyManager {
         _syncState();
         _;
     }
+
     //_reporterRegistrar -> Factory address
-    constructor(address _emergencyMultisig, address _reporterRegistrar, address[] memory reporters, Config memory config)
-    {
-        if (_emergencyMultisig == address(0) || _reporterRegistrar == address(0)) revert ZeroAddress();
+    constructor(
+        address _emergencyMultisig,
+        address _reporterRegistrar,
+        address[] memory reporters,
+        Config memory config
+    ) {
+        if (_emergencyMultisig == address(0) || _reporterRegistrar == address(0)) {
+            revert ZeroAddress();
+        }
         if (config.emergencyDuration == 0) revert InvalidState();
 
         emergencyMultisig = _emergencyMultisig;

@@ -225,9 +225,9 @@ contract Factory is IFactory, Ownable {
 
         // deploy hook
         address hook;
-        try this.deployHookFromFactory(_protocol.fundraisingToken, _protocol.vault, _salt)
-            returns (address deployedHook)
-        {
+        try this.deployHookFromFactory(_protocol.fundraisingToken, _protocol.vault, _salt) returns (
+            address deployedHook
+        ) {
             hook = deployedHook;
         } catch {
             _tryRecordEndpointFailure();
@@ -260,7 +260,8 @@ contract Factory is IFactory, Ownable {
         // store pool key for easy access
         poolKeys[_protocol.fundraisingToken] = pool;
 
-        try this.positionManagerMulticall(positionManager, params) {} catch {
+        try this.positionManagerMulticall(positionManager, params) {}
+        catch {
             _tryRecordEndpointFailure();
             revert PositionManagerCallFailed();
         }
@@ -317,11 +318,11 @@ contract Factory is IFactory, Ownable {
             abi.encodeWithSelector(IPositionManager.modifyLiquidities.selector, abi.encode(actions, params), deadline);
     }
 
-    function deployHookFromFactory(
-        address fundraisingToken,
-        address vault,
-        bytes32 salt
-    ) external onlySelf returns (address hook) {
+    function deployHookFromFactory(address fundraisingToken, address vault, bytes32 salt)
+        external
+        onlySelf
+        returns (address hook)
+    {
         hook = hookDeployer.deployHook(fundraisingToken, vault, salt);
     }
 

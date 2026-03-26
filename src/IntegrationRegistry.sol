@@ -11,12 +11,12 @@ contract IntegrationRegistry is Ownable {
         QUOTER,
         POOL_MANAGER,
         POSITION_MANAGER,
-        STATE_VIEW,
-        EMERGENCY_MANAGER
+        STATE_VIEW
     }
 
     error ZeroAddress();
     error EmergencyIsNotActive();
+    error NotAllowedAtAddress();
     error NoCodeAtAddress();
 
     address public router; // The address of the uniswap universal router
@@ -27,9 +27,9 @@ contract IntegrationRegistry is Ownable {
     address public stateView; // The address of the uniswap v4 state view
     address public emergencyManager; // The address of the emergency manager contract
 
-    mapping(Endpoint => mapping(bytes32 => bool)) public isAllowedCodehash; // Mapping to track allowed function selectors for each integration type
+    mapping(Endpoint => mapping(address => bool)) public isAllowedAddress; // Mapping to track allowed addresses for each integration type
 
-    event AllowListConfigured(Endpoint endpointType, bytes32 codehash, bool allowed);
+    event AllowListConfigured(Endpoint endpointType, address allowedAddress, bool allowed);
     event IntegrationUpdated(Endpoint endpointType, address oldAddress, address newAddress);
 
     modifier nonZeroAddress(address _address) {
@@ -69,8 +69,7 @@ contract IntegrationRegistry is Ownable {
         onlyOwner
         nonZeroAddress(newAddress)
     {
-        if (newAddress.code.length == 0) revert NoCodeAtAddress();
-        if (!isAllowedCodehash[endpoint][newAddress.codehash]) revert NoCodeAtAddress();
+        if (!isAllowedAddress[endpoint][newAddress]) revert NotAllowedAtAddress();
         if (!IEmergencyManager(emergencyManager).isEmergencyActive()) revert EmergencyIsNotActive();
         address currentAddress;
         if (endpoint == Endpoint.ROUTER) {
@@ -91,16 +90,14 @@ contract IntegrationRegistry is Ownable {
         } else if (endpoint == Endpoint.STATE_VIEW) {
             currentAddress = stateView;
             stateView = newAddress;
-        } else if (endpoint == Endpoint.EMERGENCY_MANAGER) {
-            currentAddress = emergencyManager;
-            emergencyManager = newAddress;
         }
 
         emit IntegrationUpdated(endpoint, currentAddress, newAddress);
     }
 
-    function setAllowedCodehash(Endpoint endpoint, bytes32 codehash, bool allowed) external onlyOwner {
-        isAllowedCodehash[endpoint][codehash] = allowed;
-        emit AllowListConfigured(endpoint, codehash, allowed);
+    function setAllowedAddress(Endpoint endpoint, address newAddress, bool allowed) external onlyOwner {
+        if (newAddress.code.length == 0) revert NoCodeAtAddress();
+        isAllowedAddress[endpoint][newAddress] = allowed;
+        emit AllowListConfigured(endpoint, newAddress, allowed);
     }
 }

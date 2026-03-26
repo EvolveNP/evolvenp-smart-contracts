@@ -6,6 +6,7 @@ import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 contract EmergencyManager is IEmergencyManager {
     uint256 public constant TRIGGER_QUOTE_FAILURE = 1 << 0;
     uint256 public constant TRIGGER_SWAP_FAILURE = 1 << 1;
+    uint256 public constant TRIGGER_ENDPOINT_FAILURE = 1 << 2;
 
     error ZeroAddress();
     error NotAuthorizedReporter();
@@ -42,6 +43,7 @@ contract EmergencyManager is IEmergencyManager {
     EmergencyState internal emergencyState;
     uint256 public emergencyExpiresAt;
     uint256 public armedReasonFlags;
+    uint64 public endpointFailureCount;
 
     FailureCounters public quoteFailures;
     FailureCounters public swapFailures;
@@ -50,6 +52,7 @@ contract EmergencyManager is IEmergencyManager {
 
     event EmergencyArmed(
         uint256 triggerFlags,
+        uint64 endpointFailureCount,
         uint64 consecutiveQuoteFailures,
         uint64 quoteFailuresInWindow,
         uint64 consecutiveSwapFailures,
@@ -157,6 +160,13 @@ contract EmergencyManager is IEmergencyManager {
         }
     }
 
+    function recordEndpointFailure() external override onlyReporter syncBefore {
+        unchecked {
+            ++endpointFailureCount;
+        }
+        _armEmergency(TRIGGER_ENDPOINT_FAILURE);
+    }
+
     function _recordFailure(FailureCounters storage counters, uint256 window) internal {
         unchecked {
             ++counters.consecutive;
@@ -179,6 +189,7 @@ contract EmergencyManager is IEmergencyManager {
             emergencyState = EmergencyState.ARMED;
             emit EmergencyArmed(
                 armedReasonFlags,
+                endpointFailureCount,
                 quoteFailures.consecutive,
                 quoteFailures.inWindow,
                 swapFailures.consecutive,
@@ -198,6 +209,7 @@ contract EmergencyManager is IEmergencyManager {
         emergencyState = EmergencyState.NORMAL;
         emergencyExpiresAt = 0;
         armedReasonFlags = 0;
+        endpointFailureCount = 0;
         quoteFailures.consecutive = 0;
         quoteFailures.inWindow = 0;
         quoteFailures.windowStart = 0;

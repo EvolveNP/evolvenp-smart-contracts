@@ -63,6 +63,15 @@ contract EmergencyManagerTest is Test {
         assertEq(manager.armedReasonFlags(), manager.TRIGGER_SWAP_FAILURE());
     }
 
+    function testEndpointFailureArmsEmergency() public {
+        vm.prank(reporter);
+        manager.recordEndpointFailure();
+
+        assertEq(uint256(manager.mode()), uint256(IEmergencyManager.EmergencyState.ARMED));
+        assertEq(manager.armedReasonFlags(), manager.TRIGGER_ENDPOINT_FAILURE());
+        assertEq(manager.endpointFailureCount(), 1);
+    }
+
     function testOnlyReporterCanRecordFailures() public {
         vm.expectRevert(EmergencyManager.NotAuthorizedReporter.selector);
         manager.recordSwapFailure();

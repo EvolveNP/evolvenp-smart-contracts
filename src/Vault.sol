@@ -23,6 +23,7 @@ contract Vault is Swap {
     error OnlySelf();
     error NoBeneficiaries();
     error ZeroSwapAmount();
+    error SellCheckFailed();
     error QuoteFailed();
     error SwapFailed();
 
@@ -82,7 +83,14 @@ contract Vault is Swap {
         if (manager.isEmergencyActive()) revert EmegerncyIsActive();
         if (block.timestamp < lastSuccessAt + intervalSeconds) revert NotDue();
         if (IERC20(fundraisingToken).balanceOf(address(this)) < minTokenBalanceToExecute) revert InsufficientBalance();
-        if (!shouldAllowSell()) revert UnsafePrice();
+        bool shouldSell;
+        try this.checkShouldAllowSell() returns (bool allowed) {
+            shouldSell = allowed;
+        } catch {
+            _tryRecordEndpointFailure(manager);
+            revert SellCheckFailed();
+        }
+        if (!shouldSell) revert UnsafePrice();
 
         uint256 amountIn = _getSwapAmountIn();
         uint256 minAmountOut;
@@ -139,6 +147,10 @@ contract Vault is Swap {
         uint256 tokenBalance = IERC20(fundraisingToken).balanceOf(address(this));
         amountIn = (tokenBalance * swapPercentage) / 1e18;
         if (amountIn == 0) revert ZeroSwapAmount();
+    }
+
+    function checkShouldAllowSell() external view onlySelf returns (bool) {
+        return shouldAllowSell();
     }
 
     function shouldAllowSell() public view returns (bool) {
@@ -202,5 +214,9 @@ contract Vault is Swap {
 
     function setFundraisingToken(address _fundraisingToken) external onlyFactory {
         fundraisingToken = _fundraisingToken;
+    }
+
+    function _tryRecordEndpointFailure(IEmergencyManager manager) internal {
+        try manager.recordEndpointFailure() {} catch {}
     }
 }

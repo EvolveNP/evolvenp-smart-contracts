@@ -22,6 +22,8 @@ interface IEmergencyManager {
 
     function syncState() external returns (EmergencyState);
 
+    function recordEndpointFailure() external;
+
     function recordQuoteFailure() external;
 
     function recordSwapFailure() external;

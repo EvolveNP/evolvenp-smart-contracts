@@ -22,7 +22,7 @@ contract FundraisingToken is ERC20 {
      * State Variables
      */
     address public immutable lpManager; // The address of the liquidity pool manager
-    address public immutable treasuryAddress; //The address of the treasury wallet
+    address public immutable vault; //The address of the treasury wallet
     uint8 _decimals;
 
     /**
@@ -49,7 +49,7 @@ contract FundraisingToken is ERC20 {
      * @param symbol The symbol of the token.
      * @param decimals_ Number of decimals the token uses.
      * @param _lpManager The address of the liquidity pool manager.
-     * @param _treasuryAddress The address of the treasury wallet.
+     * @param _vault The address of the vault.
      * @param _totalSupply The total supply of tokens to mint initially.
      * @dev Mints 75% of total supply to the liquidity pool manager and 25% to the treasury wallet.
      */
@@ -58,18 +58,18 @@ contract FundraisingToken is ERC20 {
         string memory symbol,
         uint8 decimals_,
         address _lpManager,
-        address _treasuryAddress,
+        address _vault,
         uint256 _totalSupply
-    ) ERC20(name, symbol) nonZeroAddress(_lpManager) nonZeroAddress(_treasuryAddress) nonZeroAmount(_totalSupply) {
-        if (_lpManager == _treasuryAddress) revert SameAddress();
+    ) ERC20(name, symbol) nonZeroAddress(_lpManager) nonZeroAddress(_vault) nonZeroAmount(_totalSupply) {
+        if (_lpManager == _vault) revert SameAddress();
         lpManager = _lpManager;
-        treasuryAddress = _treasuryAddress;
+        vault = _vault;
         _decimals = decimals_;
 
         // mint 75% to LP manager 100% = 1e18
         _mint(lpManager, (_totalSupply * 75e16) / 1e18);
         // mint 25% to treasury wallet
-        _mint(treasuryAddress, (_totalSupply * 25e16) / 1e18);
+        _mint(vault, (_totalSupply * 25e16) / 1e18);
     }
 
     /**

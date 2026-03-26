@@ -54,7 +54,7 @@ contract FundraisingTokenHook is BaseHook {
     uint256 internal launchBlock; // Block number when the fundraising token was launched
 
     address public immutable fundraisingTokenAddress; // The address of the fundraising token
-    address public immutable treasuryAddress; // The address of the treasury wallet address
+    address public immutable vault; // The address of the treasury wallet address
     address public immutable donationAddress; // The address of the donation wallet address
     uint256 public constant maximumThreshold = 30e16; // The maximum threshold for the liquidity pool 30% = 30e16
     address public router; // router address used to swap in treasury and donation wallet
@@ -86,7 +86,7 @@ contract FundraisingTokenHook is BaseHook {
      * This constructor sets up immutable references for critical protocol components:
      * - The Uniswap V4 `PoolManager` used for managing pool interactions.
      * - The `fundraisingTokenAddress` for which this hook will apply buy/sell rules and tax logic.
-     * - The `treasuryAddress`, which receives collected fees from swaps.
+     * - The `vault`, which receives collected fees from swaps.
      * - The `donationAddress`, which may be exempted from certain fee or restriction rules.
      *
      * It also records the deployment `launchTimestamp` and `launchBlock`, which are later
@@ -94,14 +94,12 @@ contract FundraisingTokenHook is BaseHook {
      *
      * @param _poolManager The address of the Uniswap V4 PoolManager contract.
      * @param _fundraisingTokenAddress The address of the fundraising token governed by this hook.
-     * @param _treasuryAddress The address of the treasury wallet that receives swap fees (immutable).
-     * @param _donationAddress The address of the donation wallet associated with this fundraising token.
+     * @param _vault The address of the treasury wallet that receives swap fees (immutable).
      */
     constructor(
         address _poolManager,
         address _fundraisingTokenAddress,
-        address _treasuryAddress,
-        address _donationAddress,
+        address _vault,
         address _router,
         address _quoter,
         address _stateView
@@ -109,8 +107,7 @@ contract FundraisingTokenHook is BaseHook {
         fundraisingTokenAddress = _fundraisingTokenAddress;
         launchTimestamp = block.timestamp;
         launchBlock = block.number;
-        treasuryAddress = _treasuryAddress;
-        donationAddress = _donationAddress;
+        vault = _vault;
         router = _router;
         quoter = _quoter;
         stateView = _stateView;
@@ -227,7 +224,7 @@ contract FundraisingTokenHook is BaseHook {
      * - Detects **sell transactions** by comparing `zeroForOne` with token ordering.
      * - Calls `checkIfTaxIncurred` to determine if the tax mechanism is active.
      * - Calculates and deducts the fee based on `TAX_FEE_PERCENTAGE / TAX_FEE_DENOMINATOR`.
-     * - Transfers the deducted fee to `treasuryAddress` via `poolManager.take`.
+     * - Transfers the deducted fee to `vault` via `poolManager.take`.
      * - Returns a `BeforeSwapDelta` reflecting the amount deducted before swap execution.
      *
      * @param key The Uniswap V4 pool key containing currencies, fee tier, and hook configuration.
@@ -242,7 +239,7 @@ contract FundraisingTokenHook is BaseHook {
      * @custom:security
      * - Uses `tx.origin` to reference the actual user rather than the router contract.
      * - Ensures only valid sell transactions trigger taxation.
-     * - Fee flows directly to `treasuryAddress`, which must be trusted and controlled by governance.
+     * - Fee flows directly to `vault`, which must be trusted and controlled by governance.
      * - Prevents overflow in signed integer conversions.
      */
     function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata)
@@ -268,7 +265,7 @@ contract FundraisingTokenHook is BaseHook {
             // Ensure fits in signed int128 before casting in any downstream use
             if (feeAmount >= ((uint256(1) << 127) - 1)) revert FeeToLarge();
 
-            poolManager.take(Currency.wrap(fundraisingTokenAddress), treasuryAddress, feeAmount);
+            poolManager.take(Currency.wrap(fundraisingTokenAddress), vault, feeAmount);
         }
 
         BeforeSwapDelta returnDelta = toBeforeSwapDelta(
@@ -304,8 +301,8 @@ contract FundraisingTokenHook is BaseHook {
      * @custom:reverts FeeToLarge If the computed fee exceeds the 127-bit signed integer limit.
      * @custom:security
      *      - Relies on `tx.origin` to identify users; ensure this is acceptable in this model.
-     *      - Transfers the buy fee directly to `treasuryAddress` using `poolManager.take`.
-     *      - `treasuryAddress`, `fundraisingTokenAddress`, and `poolManager` are trusted and immutable.
+     *      - Transfers the buy fee directly to `vault` using `poolManager.take`.
+     *      - `vault`, `fundraisingTokenAddress`, and `poolManager` are trusted and immutable.
      */
     function _afterSwap(
         address sender,
@@ -341,7 +338,7 @@ contract FundraisingTokenHook is BaseHook {
                 feeAmount = (uint256(_amountOut) * TAX_FEE_PERCENTAGE) / TAX_FEE_DENOMINATOR;
 
                 // sends the fee to treasury wallet
-                poolManager.take(Currency.wrap(fundraisingTokenAddress), treasuryAddress, feeAmount);
+                poolManager.take(Currency.wrap(fundraisingTokenAddress), vault, feeAmount);
             }
         }
         return (BaseHook.afterSwap.selector, int128(int256(feeAmount)));
@@ -393,7 +390,7 @@ contract FundraisingTokenHook is BaseHook {
      * @return percentage The treasury’s balance as a percentage of the total token supply, scaled by 1e18.
      */
     function getTreasuryBalanceInPerecent() internal view returns (uint256) {
-        uint256 treasuryBalance = IERC20(fundraisingTokenAddress).balanceOf(treasuryAddress);
+        uint256 treasuryBalance = IERC20(fundraisingTokenAddress).balanceOf(vault);
         uint256 totalSupply = IERC20(fundraisingTokenAddress).totalSupply();
         if (totalSupply == 0) return 0;
         return (treasuryBalance * 1e18) / totalSupply;
@@ -410,9 +407,7 @@ contract FundraisingTokenHook is BaseHook {
      * @return bool Returns `true` if tax should be incurred, otherwise `false`.
      */
     function checkIfTaxIncurred(address sender) internal view returns (bool) {
-        return
-            (getTreasuryBalanceInPerecent() < maximumThreshold) && sender != treasuryAddress
-                && sender != donationAddress;
+        return (getTreasuryBalanceInPerecent() < maximumThreshold) && sender != vault && sender != donationAddress;
     }
 
     function getMsgSender(address sender) internal view returns (address) {

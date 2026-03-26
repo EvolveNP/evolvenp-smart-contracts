@@ -27,10 +27,11 @@ contract Factory is IFactory, Ownable {
     error VaultAlreadyExists();
     error FundraisingVaultNotCreated();
     error PoolAlreadyExists();
-    error InvalidAmount0();
+    error UnsupportedUnderlyingAsset();
 
     address public immutable registryAddress;
     address public immutable emergencyManagerAddress;
+    address public immutable usdcAddress;
     IHookDeployer public immutable hookDeployer;
 
     /**
@@ -40,8 +41,8 @@ contract Factory is IFactory, Ownable {
     mapping(address => FundraisingProtocol) internal protocols;
 
     /**
-     * @notice Mapping storing Uniswap pool keys by owner.
-     * @dev Used to quickly access pool details for a given non-profit owner.
+     * @notice Mapping storing Uniswap pool keys by fundraising token address.
+     * @dev Used to quickly access pool details for a given fundraising token.
      */
     mapping(address => PoolKey) public poolKeys;
 
@@ -49,13 +50,9 @@ contract Factory is IFactory, Ownable {
      *  @notice Emitted when a new fundraising vault is created.
      * @dev Contains the fundraising token, treasury wallet, donation wallet, and owner addresses.
      * @param fundraisingToken The address of the fundraising token.
-     * @param treasuryWallet The address of the treasury wallet.
-     * @param donationWallet The address of the donation wallet.
-     * @param owner The address of the owner.
+     * @param vault The address of the vault.
      */
-    event FundraisingVaultCreated(
-        address fundraisingToken, address treasuryWallet, address donationWallet, address owner
-    );
+    event FundraisingVaultCreated(address fundraisingToken, address vault);
 
     /**
      *  @notice Emitted when a new liquidity pool is created.
@@ -88,15 +85,17 @@ contract Factory is IFactory, Ownable {
         _;
     }
 
-    constructor(address _registryAddress, address _emergencyManagerAddress, address _hookDeployer)
+    constructor(address _registryAddress, address _emergencyManagerAddress, address _hookDeployer, address _usdcAddress)
         Ownable(msg.sender)
         nonZeroAddress(_registryAddress)
         nonZeroAddress(_emergencyManagerAddress)
         nonZeroAddress(_hookDeployer)
+        nonZeroAddress(_usdcAddress)
     {
         registryAddress = _registryAddress;
         emergencyManagerAddress = _emergencyManagerAddress;
         hookDeployer = IHookDeployer(_hookDeployer);
+        usdcAddress = _usdcAddress;
     }
 
     function createFundraisingVault(
@@ -104,46 +103,44 @@ contract Factory is IFactory, Ownable {
         string calldata _tokenSymbol,
         address _underlyingAddress,
         address _owner,
-        address[] memory _beneficiaries
+        address[] memory _beneficiaries,
+        uint256 _intervalSeconds,
+        uint256 _swapPercentage,
+        uint256 _minTokenBalanceToExecute,
+        uint256 _totalSupply
     ) external nonZeroAddress(_owner) onlyOwner {
         if (protocols[_owner].fundraisingToken != address(0)) {
             revert VaultAlreadyExists();
         }
-        // deploy donation wallet
-        //  DonationWallet donationWallet = DonationWallet(payable(address(new BeaconProxy(donationWalletBeacon, ""))));
+        if (_underlyingAddress != usdcAddress) revert UnsupportedUnderlyingAsset();
 
-        // deploy treasury wallet
-        //   TreasuryWallet treasuryWallet = TreasuryWallet(payable(address(new BeaconProxy(treasuryWalletBeacon, ""))));
-
-        uint8 _decimals = 18;
-        if (_underlyingAddress != address(0)) {
-            // set the decimals of the fundraising token same as underlying token
-            _decimals = IERC20Metadata(_underlyingAddress).decimals();
-        }
-
-        // Deploy fundraising token
-        FundraisingToken fundraisingToken =
-            new FundraisingToken(_tokenName, _tokenSymbol, _decimals, owner(), address(20), 1e9 * 10 ** _decimals);
+        uint8 _decimals = IERC20Metadata(usdcAddress).decimals();
 
         address _registryAddress = registryAddress;
         address _emergencyManager = emergencyManagerAddress;
         Vault vault = new Vault(
-            address(fundraisingToken),
             _underlyingAddress,
-            30,
+            _intervalSeconds,
             _beneficiaries,
-            20,
-            _emergencyManager,
+            _swapPercentage,
             _registryAddress,
-            1000 * 10 ** _decimals, //TODO
+            _emergencyManager,
+            _minTokenBalanceToExecute,
             address(this)
         );
 
-        protocols[_owner] = FundraisingProtocol(
-            address(fundraisingToken), _underlyingAddress, address(vault), address(30), address(0), _owner, false
+        // Deploy fundraising token
+        FundraisingToken fundraisingToken = new FundraisingToken(
+            _tokenName, _tokenSymbol, _decimals, owner(), address(vault), _totalSupply * 10 ** _decimals
         );
 
-        emit FundraisingVaultCreated(address(fundraisingToken), address(30), address(20), _owner);
+        // set fundraising token addrress in vault
+        vault.setFundraisingToken(address(fundraisingToken));
+
+        protocols[address(fundraisingToken)] =
+            FundraisingProtocol(address(fundraisingToken), _underlyingAddress, address(vault), address(0), false);
+
+        emit FundraisingVaultCreated(address(fundraisingToken), address(vault));
     }
 
     /**
@@ -180,7 +177,6 @@ contract Factory is IFactory, Ownable {
 
     function createPool(address _owner, uint256 _amount0, uint256 _amount1, bytes32 _salt)
         external
-        payable
         nonZeroAddress(_owner)
         nonZeroAmount(_amount0)
         nonZeroAmount(_amount1)
@@ -197,22 +193,18 @@ contract Factory is IFactory, Ownable {
         bytes[] memory params = new bytes[](2);
 
         FundraisingProtocol storage _protocol = protocols[_owner];
-        if (_protocol.fundraisingToken == address(0) || _protocol.treasuryWallet == address(0)) {
+        if (_protocol.fundraisingToken == address(0) || _protocol.vault == address(0)) {
             revert FundraisingVaultNotCreated();
         }
         if (_protocol.isLPCreated) revert PoolAlreadyExists();
+        if (_protocol.underlyingAddress != usdcAddress) revert UnsupportedUnderlyingAsset();
 
         address _currency0 = _protocol.underlyingAddress;
         address _currency1 = _protocol.fundraisingToken;
         uint256 amount0 = _amount0;
         uint256 amount1 = _amount1;
 
-        if (_currency0 != address(0)) {
-            IERC20Metadata(_currency0).safeTransferFrom(msg.sender, address(this), amount0);
-        } else {
-            if (amount0 != msg.value) revert InvalidAmount0();
-        }
-
+        IERC20Metadata(_currency0).safeTransferFrom(msg.sender, address(this), amount0);
         IERC20Metadata(_currency1).safeTransferFrom(msg.sender, address(this), amount1);
 
         if (_currency0 > _currency1) {
@@ -228,14 +220,7 @@ contract Factory is IFactory, Ownable {
 
         // deploy hook
         address hook = hookDeployer.deployHook(
-            poolManager,
-            _protocol.fundraisingToken,
-            _protocol.treasuryWallet,
-            _protocol.donationWallet,
-            router,
-            quoter,
-            stateView,
-            _salt
+            poolManager, _protocol.fundraisingToken, _protocol.vault, router, quoter, stateView, _salt
         );
 
         // transfer assets to this contract;
@@ -253,15 +238,8 @@ contract Factory is IFactory, Ownable {
 
         uint256 deadline = block.timestamp + 1000;
 
-        // Eth is always currency 0 as it is zero address
-        uint256 valueToPass = pool.currency0.isAddressZero() ? amount0 : 0;
-
-        // ether is always currency0
-        if (!pool.currency0.isAddressZero()) {
-            IERC20Metadata(_currency0).approve(address(permit2), amount0);
-            IPermit2(permit2).approve(_currency0, positionManager, uint160(amount0), uint48(deadline));
-        }
-
+        IERC20Metadata(_currency0).approve(address(permit2), amount0);
+        IPermit2(permit2).approve(_currency0, positionManager, uint160(amount0), uint48(deadline));
         IERC20Metadata(_currency1).approve(address(permit2), amount1);
         IPermit2(permit2).approve(_currency1, positionManager, uint160(amount1), uint48(deadline));
 
@@ -269,9 +247,9 @@ contract Factory is IFactory, Ownable {
         _protocol.hook = hook;
 
         // store pool key for easy access
-        poolKeys[_owner] = pool;
+        poolKeys[_protocol.fundraisingToken] = pool;
 
-        _positionManager.multicall{value: valueToPass}(params);
+        _positionManager.multicall(params);
 
         emit LiquidityPoolCreated(_protocol.underlyingAddress, _protocol.fundraisingToken, _owner);
     }
@@ -280,8 +258,8 @@ contract Factory is IFactory, Ownable {
         return protocols[_owner];
     }
 
-    function getPoolKeys(address _owner) external view returns (PoolKey memory) {
-        return poolKeys[_owner];
+    function getPoolKeys(address _fundraisingTokenAddress) external view returns (PoolKey memory) {
+        return poolKeys[_fundraisingTokenAddress];
     }
 
     /**
@@ -301,20 +279,8 @@ contract Factory is IFactory, Ownable {
     {
         bytes memory actions;
         bytes[] memory params;
-        address _currency0 = Currency.unwrap(key.currency0);
-        address _currency1 = Currency.unwrap(key.currency1);
-
-        bool isETHPair = ((_currency0 == address(0)) || (_currency1 == address(0)));
-        if (!isETHPair) {
-            actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
-            params = new bytes[](2);
-        } else {
-            // For ETH liquidity positions
-            actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
-            params = new bytes[](3);
-
-            params[2] = abi.encode(address(0), owner()); // only for ETH liquidity positions
-        }
+        actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        params = new bytes[](2);
 
         int24 maxTickSpacing = TickMath.MAX_TICK_SPACING;
 

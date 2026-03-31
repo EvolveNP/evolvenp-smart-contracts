@@ -131,8 +131,7 @@ contract Vault is Swap {
             return;
         }
 
-        _distributeProceeds(amountOut);
-        lastSuccessAt = block.timestamp;
+        _finalizeSuccessfulExecution(amountOut);
     }
 
     function isDue() external view returns (bool) {
@@ -196,20 +195,8 @@ contract Vault is Swap {
 
         int24 currentTick = hook.getCurrentTick(key);
 
-        if (fundraisingIsToken0) {
-            // FundraisingToken DOWN too much → block
-            if (avgTick - currentTick > maxTickDeviation) {
-                return false;
-            }
-        } else {
-            // FundraisingToken DOWN too much → block
-            if (currentTick - avgTick > maxTickDeviation) {
-                return false;
-            }
-        }
-
-        // UP, SAME, or small dip → allowed
-        return true;
+        if (fundraisingIsToken0) return avgTick - currentTick <= maxTickDeviation;
+        return currentTick - avgTick <= maxTickDeviation;
     }
 
     function _distributeProceeds(uint256 amountOut) internal {
@@ -241,6 +228,11 @@ contract Vault is Swap {
 
     function _tryRecordEndpointFailure(IEmergencyManager manager) internal {
         try manager.recordEndpointFailure(uint8(IIntegrationRegistry.Endpoint.STATE_VIEW)) {} catch {}
+    }
+
+    function _finalizeSuccessfulExecution(uint256 amountOut) internal {
+        _distributeProceeds(amountOut);
+        lastSuccessAt = block.timestamp;
     }
 
     function _getPoolKey() internal view returns (PoolKey memory key, bool isCurrency0FundraisingToken) {

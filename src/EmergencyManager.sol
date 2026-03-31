@@ -64,11 +64,6 @@ contract EmergencyManager is IEmergencyManager {
         _;
     }
 
-    modifier syncBefore() {
-        _syncState();
-        _;
-    }
-
     //_reporterRegistrar -> Factory address
     constructor(
         address _emergencyMultisig,
@@ -111,14 +106,16 @@ contract EmergencyManager is IEmergencyManager {
         return emergencyState;
     }
 
-    function activateEmergency() external override onlyEmergencyMultisig syncBefore {
+    function activateEmergency() external override onlyEmergencyMultisig {
+        _syncState();
         if (emergencyState != EmergencyState.ARMED) revert InvalidState();
         emergencyState = EmergencyState.EMERGENCY_ACTIVE;
         emergencyExpiresAt = block.timestamp + emergencyDuration;
         emit EmergencyActivated(emergencyExpiresAt);
     }
 
-    function closeEmergency() external override onlyEmergencyMultisig syncBefore {
+    function closeEmergency() external override onlyEmergencyMultisig {
+        _syncState();
         if (emergencyState != EmergencyState.EMERGENCY_ACTIVE) revert InvalidState();
         _resetToNormal();
         emit EmergencyExited();
@@ -130,29 +127,34 @@ contract EmergencyManager is IEmergencyManager {
         emit ReporterConfigured(reporter, allowed);
     }
 
-    function recordQuoteFailure() public override onlyReporter syncBefore {
+    function recordQuoteFailure() public override onlyReporter {
+        _syncState();
         _recordFailure(quoteFailures);
         if (quoteFailures.consecutive >= quoteFailureThreshold) {
             _armEmergency(TRIGGER_QUOTE_FAILURE);
         }
     }
 
-    function recordQuoteSuccess() external onlyReporter syncBefore {
+    function recordQuoteSuccess() external onlyReporter {
+        _syncState();
         quoteFailures.consecutive = 0;
     }
 
-    function recordSwapFailure() public override onlyReporter syncBefore {
+    function recordSwapFailure() public override onlyReporter {
+        _syncState();
         _recordFailure(swapFailures);
         if (swapFailures.consecutive >= swapFailureThreshold) {
             _armEmergency(TRIGGER_SWAP_FAILURE);
         }
     }
 
-    function recordSwapSuccess() external onlyReporter syncBefore {
+    function recordSwapSuccess() external onlyReporter {
+        _syncState();
         swapFailures.consecutive = 0;
     }
 
-    function recordEndpointFailure(uint8 endpoint) external override onlyReporter syncBefore {
+    function recordEndpointFailure(uint8 endpoint) external override onlyReporter {
+        _syncState();
         emit EndpointFailureRecorded(IIntegrationRegistry.Endpoint(endpoint));
         _recordFailure(endpointFailures);
         if (endpointFailures.consecutive >= endpointFailureThreshold) {

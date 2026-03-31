@@ -225,6 +225,23 @@ contract VaultTest is Test {
         vault.executeMonthlyEvent();
     }
 
+    function testExecuteMonthlyEventRevertsWhenFundraisingTokenIsNotConfigured() public {
+        Vault unconfiguredFundraisingVault = new Vault(
+            address(usdc),
+            1 days,
+            beneficiaries,
+            5e17,
+            address(registry),
+            address(emergencyManager),
+            100,
+            address(factory)
+        );
+
+        vm.warp(block.timestamp + 1 days);
+        vm.expectRevert(Vault.FundraisingTokenNotConfigured.selector);
+        unconfiguredFundraisingVault.executeMonthlyEvent();
+    }
+
     function testExecuteMonthlyEventRevertsWhenNotDue() public {
         vm.expectRevert(Vault.NotDue.selector);
         vault.executeMonthlyEvent();
@@ -499,6 +516,28 @@ contract VaultTest is Test {
 
         hook.configure(0, 0, 500, false);
         assertFalse(vault.shouldAllowSell());
+
+        hook.configure(0, 0, 100, false);
+        assertTrue(vault.shouldAllowSell());
+    }
+
+    function testShouldAllowSellRevertsWithoutHookAndReturnsTrueForCurrencyZeroPath() public {
+        Vault noHookVault = new Vault(
+            address(usdc),
+            1 days,
+            beneficiaries,
+            5e17,
+            address(registry),
+            address(emergencyManager),
+            100,
+            address(factory)
+        );
+
+        vm.prank(address(factory));
+        noHookVault.setFundraisingToken(address(fundraisingToken));
+
+        vm.expectRevert(Vault.HookNotConfigured.selector);
+        noHookVault.shouldAllowSell();
 
         hook.configure(0, 0, 100, false);
         assertTrue(vault.shouldAllowSell());

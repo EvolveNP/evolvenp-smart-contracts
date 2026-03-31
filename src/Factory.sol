@@ -108,13 +108,12 @@ contract Factory is IFactory, Ownable {
         string calldata _tokenName,
         string calldata _tokenSymbol,
         address _underlyingAddress,
-        address _owner,
         address[] memory _beneficiaries,
         uint256 _intervalSeconds,
         uint256 _swapPercentage,
         uint256 _minTokenBalanceToExecute,
         uint256 _totalSupply
-    ) external nonZeroAddress(_owner) onlyOwner {
+    ) external onlyOwner {
         if (_underlyingAddress != usdcAddress) revert UnsupportedUnderlyingAsset();
 
         uint8 _decimals = IERC20Metadata(usdcAddress).decimals();
@@ -208,7 +207,9 @@ contract Factory is IFactory, Ownable {
         uint256 amount0 = _amount0;
         uint256 amount1 = _amount1;
 
-        if (IERC20Metadata(_currency1).balanceOf(address(this)) < amount1) revert InsufficientFundraisingTokenBalance();
+        if (IERC20Metadata(_currency1).balanceOf(address(this)) < amount1) {
+            revert InsufficientFundraisingTokenBalance();
+        }
 
         if (_currency0 > _currency1) {
             (_currency0, _currency1) = (_currency1, _currency0);
@@ -229,7 +230,11 @@ contract Factory is IFactory, Ownable {
             hook = deployedHook;
         } catch {
             _handlePoolCreationFailure(
-                _protocol.fundraisingToken, _protocol.underlyingAddress, 0, HookDeploymentFailed.selector, IIntegrationRegistry.Endpoint.HOOK_DEPLOYER
+                _protocol.fundraisingToken,
+                _protocol.underlyingAddress,
+                0,
+                HookDeploymentFailed.selector,
+                IIntegrationRegistry.Endpoint.HOOK_DEPLOYER
             );
             return;
         }

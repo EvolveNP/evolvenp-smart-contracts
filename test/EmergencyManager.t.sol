@@ -228,4 +228,17 @@ contract EmergencyManagerTest is Test {
         vm.expectRevert(EmergencyManager.NotAuthorizedReporter.selector);
         manager.recordQuoteFailure();
     }
+
+    function testSyncStateReturnsCurrentOrExpiredMode() public {
+        assertEq(uint256(manager.syncState()), uint256(IEmergencyManager.EmergencyState.NORMAL));
+
+        vm.prank(reporter);
+        manager.recordEndpointFailure(uint8(IIntegrationRegistry.Endpoint.PERMIT2));
+
+        vm.prank(multisig);
+        manager.activateEmergency();
+
+        vm.warp(block.timestamp + 3 days + 1);
+        assertEq(uint256(manager.syncState()), uint256(IEmergencyManager.EmergencyState.NORMAL));
+    }
 }

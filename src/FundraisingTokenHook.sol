@@ -326,8 +326,6 @@ contract FundraisingTokenHook is BaseHook {
 
             if (isTaxCutEnabled) {
                 feeAmount = (uint256(_amountOut) * TAX_FEE_PERCENTAGE) / TAX_FEE_DENOMINATOR;
-                if (feeAmount >= ((uint256(1) << 127) - 1)) revert FeeToLarge();
-
                 // sends the fee to treasury wallet
                 poolManager.take(Currency.wrap(fundraisingTokenAddress), vault, feeAmount);
             }
@@ -402,14 +400,16 @@ contract FundraisingTokenHook is BaseHook {
     }
 
     function getMsgSender(address sender) internal view returns (address) {
-        if (sender == quoter() || sender == router()) {
+        if (sender == quoter()) {
             return IMsgSender(sender).msgSender();
-        } else {
-            // for antisniping protection we are using tx.origin the EOA account that initiates the transaction
-            // In addtion if the swap is initiated from other router address we tx.origin as default caller
-            // and we incur tax for all swap transactions initiated from other routers
-            return tx.origin;
         }
+        if (sender == router()) {
+            return IMsgSender(sender).msgSender();
+        }
+        // for antisniping protection we are using tx.origin the EOA account that initiates the transaction
+        // In addtion if the swap is initiated from other router address we tx.origin as default caller
+        // and we incur tax for all swap transactions initiated from other routers
+        return tx.origin;
     }
 
     /// @dev Called before any action that potentially modifies pool price or liquidity, such as swap or modify position

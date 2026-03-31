@@ -2,7 +2,6 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
-import {stdError} from "forge-std/StdError.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import {FundraisingTokenHook} from "../src/FundraisingTokenHook.sol";
@@ -26,6 +25,10 @@ contract MockHookToken is ERC20 {
     function mint(address to, uint256 amount) external {
         _mint(to, amount);
     }
+}
+
+contract ZeroSupplyHookToken is ERC20 {
+    constructor() ERC20("Zero", "ZERO") {}
 }
 
 contract MockHookPoolManager {
@@ -280,8 +283,8 @@ contract FundraisingTokenHookTest is Test {
         vm.warp(block.timestamp + 2 hours);
 
         SwapParams memory params =
-            SwapParams({zeroForOne: true, amountSpecified: type(int256).max, sqrtPriceLimitX96: 0});
-        vm.expectRevert(stdError.arithmeticError);
+            SwapParams({zeroForOne: true, amountSpecified: int256(1 << 134), sqrtPriceLimitX96: 0});
+        vm.expectRevert(FundraisingTokenHook.FeeToLarge.selector);
         hook.exposedBeforeSwap(user, key, params, bytes(""));
     }
 
@@ -367,6 +370,14 @@ contract FundraisingTokenHookTest is Test {
         vm.startPrank(address(0xDEAD), address(0xDEAD));
         assertEq(hook.exposedGetMsgSender(address(0x1234)), address(0xDEAD));
         vm.stopPrank();
+    }
+
+    function testTreasuryPercentReturnsZeroWhenTotalSupplyIsZero() public {
+        ZeroSupplyHookToken zeroSupplyToken = new ZeroSupplyHookToken();
+        FundraisingTokenHookHarness zeroSupplyHook =
+            new FundraisingTokenHookHarness(address(poolManager), address(zeroSupplyToken), vault, address(registry));
+
+        assertEq(zeroSupplyHook.exposedTreasuryBalancePercent(), 0);
     }
 
     function _poolKey(address currency0, address currency1) internal pure returns (PoolKey memory) {

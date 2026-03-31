@@ -25,13 +25,13 @@ contract Factory is IFactory, Ownable {
     using SafeERC20 for IERC20Metadata;
     error ZeroAddress();
     error ZeroAmount();
-    error VaultAlreadyExists();
     error FundraisingVaultNotCreated();
     error PoolAlreadyExists();
     error UnsupportedUnderlyingAsset();
     error OnlySelf();
     error HookDeploymentFailed();
     error PositionManagerCallFailed();
+    error InsufficientFundraisingTokenBalance();
 
     address public immutable registryAddress;
     address public immutable emergencyManagerAddress;
@@ -42,7 +42,6 @@ contract Factory is IFactory, Ownable {
      * @dev Contains fundraising token, wallets, hook, owner, and LP creation state.
      */
     mapping(address => FundraisingProtocol) internal protocols;
-
     /**
      * @notice Mapping storing Uniswap pool keys by fundraising token address.
      * @dev Used to quickly access pool details for a given fundraising token.
@@ -65,6 +64,7 @@ contract Factory is IFactory, Ownable {
      * @param owner The address of the owner.
      */
     event LiquidityPoolCreated(address currency0, address currency1, address owner);
+    event PoolCreationFailed(address fundraisingToken, bytes4 reason, IIntegrationRegistry.Endpoint endpoint);
 
     /**
      * @notice Ensures that the provided address is not the zero address.
@@ -115,9 +115,6 @@ contract Factory is IFactory, Ownable {
         uint256 _minTokenBalanceToExecute,
         uint256 _totalSupply
     ) external nonZeroAddress(_owner) onlyOwner {
-        if (protocols[_owner].fundraisingToken != address(0)) {
-            revert VaultAlreadyExists();
-        }
         if (_underlyingAddress != usdcAddress) revert UnsupportedUnderlyingAsset();
 
         uint8 _decimals = IERC20Metadata(usdcAddress).decimals();
@@ -138,7 +135,7 @@ contract Factory is IFactory, Ownable {
 
         // Deploy fundraising token
         FundraisingToken fundraisingToken = new FundraisingToken(
-            _tokenName, _tokenSymbol, _decimals, owner(), address(vault), _totalSupply * 10 ** _decimals
+            _tokenName, _tokenSymbol, _decimals, address(this), address(vault), _totalSupply * 10 ** _decimals
         );
 
         // set fundraising token addrress in vault
@@ -166,7 +163,7 @@ contract Factory is IFactory, Ownable {
      *      - The `_sqrtPriceX96` value is derived using Uniswap's Q96 price encoding formula
      *        via `encodeSqrtPriceX96(amount1, amount0)`.
      *
-     * @param _owner The address representing the non-profit organization owner.
+     * @param _fundraisingToken The fundraising token address used as the protocol key.
      * @param _amount0 The liquidity amount for token0 (can be native ETH if `address(0)` is underlying).
      * @param _amount1 The liquidity amount for token1 (fundraising token).
      * @param _salt The deterministic CREATE2 salt for deploying the FundraisingTokenHook,
@@ -187,9 +184,9 @@ contract Factory is IFactory, Ownable {
      * @custom:event Emits {LiquidityPoolCreated} with underlying token, fundraising token, and owner.
      */
 
-    function createPool(address _owner, uint256 _amount0, uint256 _amount1, bytes32 _salt)
+    function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1, bytes32 _salt)
         external
-        nonZeroAddress(_owner)
+        nonZeroAddress(_fundraisingToken)
         nonZeroAmount(_amount0)
         nonZeroAmount(_amount1)
         onlyOwner
@@ -199,7 +196,7 @@ contract Factory is IFactory, Ownable {
 
         bytes[] memory params = new bytes[](2);
 
-        FundraisingProtocol storage _protocol = protocols[_owner];
+        FundraisingProtocol storage _protocol = protocols[_fundraisingToken];
         if (_protocol.fundraisingToken == address(0) || _protocol.vault == address(0)) {
             revert FundraisingVaultNotCreated();
         }
@@ -211,8 +208,7 @@ contract Factory is IFactory, Ownable {
         uint256 amount0 = _amount0;
         uint256 amount1 = _amount1;
 
-        IERC20Metadata(_currency0).safeTransferFrom(msg.sender, address(this), amount0);
-        IERC20Metadata(_currency1).safeTransferFrom(msg.sender, address(this), amount1);
+        if (IERC20Metadata(_currency1).balanceOf(address(this)) < amount1) revert InsufficientFundraisingTokenBalance();
 
         if (_currency0 > _currency1) {
             (_currency0, _currency1) = (_currency1, _currency0);
@@ -232,9 +228,13 @@ contract Factory is IFactory, Ownable {
         ) {
             hook = deployedHook;
         } catch {
-            _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint.HOOK_DEPLOYER);
-            revert HookDeploymentFailed();
+            _handlePoolCreationFailure(
+                _protocol.fundraisingToken, _protocol.underlyingAddress, 0, HookDeploymentFailed.selector, IIntegrationRegistry.Endpoint.HOOK_DEPLOYER
+            );
+            return;
         }
+
+        IERC20Metadata(_protocol.underlyingAddress).safeTransferFrom(msg.sender, address(this), _amount0);
 
         // transfer assets to this contract;
 
@@ -254,29 +254,45 @@ contract Factory is IFactory, Ownable {
         IERC20Metadata(_currency0).approve(address(permit2), amount0);
         try IPermit2(permit2).approve(_currency0, positionManager, uint160(amount0), uint48(deadline)) {}
         catch {
-            _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint.PERMIT2);
-            revert PositionManagerCallFailed();
+            _handlePoolCreationFailure(
+                _protocol.fundraisingToken,
+                _protocol.underlyingAddress,
+                _amount0,
+                PositionManagerCallFailed.selector,
+                IIntegrationRegistry.Endpoint.PERMIT2
+            );
+            return;
         }
         IERC20Metadata(_currency1).approve(address(permit2), amount1);
         try IPermit2(permit2).approve(_currency1, positionManager, uint160(amount1), uint48(deadline)) {}
         catch {
-            _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint.PERMIT2);
-            revert PositionManagerCallFailed();
+            _handlePoolCreationFailure(
+                _protocol.fundraisingToken,
+                _protocol.underlyingAddress,
+                _amount0,
+                PositionManagerCallFailed.selector,
+                IIntegrationRegistry.Endpoint.PERMIT2
+            );
+            return;
+        }
+
+        try this.positionManagerMulticall(positionManager, params) {}
+        catch {
+            _handlePoolCreationFailure(
+                _protocol.fundraisingToken,
+                _protocol.underlyingAddress,
+                _amount0,
+                PositionManagerCallFailed.selector,
+                IIntegrationRegistry.Endpoint.POSITION_MANAGER
+            );
+            return;
         }
 
         _protocol.isLPCreated = true;
         _protocol.hook = hook;
-
-        // store pool key for easy access
         poolKeys[_protocol.fundraisingToken] = pool;
 
-        try this.positionManagerMulticall(positionManager, params) {}
-        catch {
-            _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint.POSITION_MANAGER);
-            revert PositionManagerCallFailed();
-        }
-
-        emit LiquidityPoolCreated(_protocol.underlyingAddress, _protocol.fundraisingToken, _owner);
+        emit LiquidityPoolCreated(_protocol.underlyingAddress, _protocol.fundraisingToken, _fundraisingToken);
     }
 
     function getProtocol(address _owner) external view returns (FundraisingProtocol memory) {
@@ -343,5 +359,19 @@ contract Factory is IFactory, Ownable {
 
     function _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint endpoint) internal {
         try IEmergencyManager(emergencyManagerAddress).recordEndpointFailure(uint8(endpoint)) {} catch {}
+    }
+
+    function _handlePoolCreationFailure(
+        address fundraisingToken,
+        address underlying,
+        uint256 refundAmount,
+        bytes4 reason,
+        IIntegrationRegistry.Endpoint endpoint
+    ) internal {
+        _tryRecordEndpointFailure(endpoint);
+        if (refundAmount != 0) {
+            IERC20Metadata(underlying).safeTransfer(msg.sender, refundAmount);
+        }
+        emit PoolCreationFailed(fundraisingToken, reason, endpoint);
     }
 }

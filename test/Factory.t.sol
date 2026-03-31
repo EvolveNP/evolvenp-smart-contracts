@@ -206,6 +206,7 @@ contract FactoryTest is Test {
         assertEq(protocol.vault, vault);
         assertEq(protocol.hook, address(0));
         assertFalse(protocol.isLPCreated);
+        assertEq(MockFactoryToken(fundraisingToken).balanceOf(address(factory)), 750 * 10 ** usdc.decimals());
     }
 
     function testCreatePoolRejectsInvalidInputs() public {
@@ -251,7 +252,6 @@ contract FactoryTest is Test {
 
         vm.startPrank(protocolAdmin);
         usdc.approve(address(factory), type(uint256).max);
-        MockFactoryToken(fundraisingToken).approve(address(factory), type(uint256).max);
         factory.createPool(fundraisingToken, 100e6, 200e6, bytes32("salt"));
         vm.stopPrank();
 
@@ -293,10 +293,13 @@ contract FactoryTest is Test {
 
         vm.startPrank(protocolAdmin);
         usdc.approve(address(factory), type(uint256).max);
-        MockFactoryToken(fundraisingToken).approve(address(factory), type(uint256).max);
-        vm.expectRevert(Factory.HookDeploymentFailed.selector);
         factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
         vm.stopPrank();
+
+        assertEq(usdc.balanceOf(address(factory)), 0);
+        IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
+        assertFalse(protocol.isLPCreated);
+        assertEq(protocol.hook, address(0));
     }
 
     function testCreatePoolRevertsWhenPermit2Fails() public {
@@ -320,10 +323,13 @@ contract FactoryTest is Test {
 
         vm.startPrank(protocolAdmin);
         usdc.approve(address(factory), type(uint256).max);
-        MockFactoryToken(fundraisingToken).approve(address(factory), type(uint256).max);
-        vm.expectRevert(Factory.PositionManagerCallFailed.selector);
         factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
         vm.stopPrank();
+
+        assertEq(usdc.balanceOf(protocolAdmin), 100e6);
+        assertEq(usdc.balanceOf(address(factory)), 0);
+        IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
+        assertFalse(protocol.isLPCreated);
     }
 
     function testCreatePoolRevertsWhenPositionManagerFails() public {
@@ -348,10 +354,13 @@ contract FactoryTest is Test {
 
         vm.startPrank(protocolAdmin);
         usdc.approve(address(factory), type(uint256).max);
-        MockFactoryToken(fundraisingToken).approve(address(factory), type(uint256).max);
-        vm.expectRevert(Factory.PositionManagerCallFailed.selector);
         factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
         vm.stopPrank();
+
+        assertEq(usdc.balanceOf(protocolAdmin), 100e6);
+        assertEq(usdc.balanceOf(address(factory)), 0);
+        IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
+        assertFalse(protocol.isLPCreated);
     }
 
     function testCreatePoolRevertsWhenAlreadyCreated() public {
@@ -367,11 +376,34 @@ contract FactoryTest is Test {
 
         vm.startPrank(protocolAdmin);
         usdc.approve(address(factory), type(uint256).max);
-        MockFactoryToken(fundraisingToken).approve(address(factory), type(uint256).max);
         factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
         vm.expectRevert(Factory.PoolAlreadyExists.selector);
         factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
         vm.stopPrank();
+    }
+
+    function testCreatePoolWorksAfterOwnershipTransfer() public {
+        vm.recordLogs();
+        vm.prank(protocolAdmin);
+        factory.createFundraisingVault(
+            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
+        );
+        (address fundraisingToken,) = _decodeCreatedVault();
+
+        vm.prank(protocolAdmin);
+        factory.transferOwnership(thirdParty);
+
+        hookDeployer.configure(fakeHook, false);
+        usdc.mint(thirdParty, 100e6);
+
+        vm.startPrank(thirdParty);
+        usdc.approve(address(factory), type(uint256).max);
+        factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
+        vm.stopPrank();
+
+        IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
+        assertTrue(protocol.isLPCreated);
+        assertEq(protocol.hook, fakeHook);
     }
 
     function testSelfOnlyEntryPointsRejectExternalCall() public {

@@ -23,7 +23,7 @@ contract FundraisingTokenTest is Test {
     }
 
     function testConstructorSetsImmutableAddresses() public view {
-        assertEq(token.lpManager(), lpManager);
+        assertEq(token.factoryAddress(), lpManager);
         assertEq(token.vault(), treasury);
     }
 

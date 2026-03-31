@@ -38,9 +38,8 @@ contract HookDeployer {
     function deployHook(address fundraisingToken, address vault, bytes32 salt) external onlyFactory returns (address) {
         address poolManager = integrationRegistry.poolManager();
 
-        FundraisingTokenHook hook = new FundraisingTokenHook{salt: salt}(
-            poolManager, fundraisingToken, vault, address(integrationRegistry)
-        );
+        FundraisingTokenHook hook =
+            new FundraisingTokenHook{salt: salt}(poolManager, fundraisingToken, vault, address(integrationRegistry));
         return address(hook);
     }
 

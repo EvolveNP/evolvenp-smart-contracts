@@ -104,6 +104,6 @@ abstract contract Swap {
 
         (uint256 amountOut,) = (IV4Quoter(integrationRegistry.quoter())).quoteExactInputSingle(params);
 
-        return (amountOut * slippage) / 1e18;
+        return (amountOut * (1e18 - slippage)) / 1e18;
     }
 }

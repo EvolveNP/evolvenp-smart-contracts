@@ -147,7 +147,7 @@ contract SwapTest is Test {
 
         uint256 minAmountOut = harness.exposedQuote(key, true, 10 ether, bytes(""));
 
-        assertEq(minAmountOut, 10 ether);
+        assertEq(minAmountOut, 190 ether);
     }
 
     function testSwapExactInputSingleForErc20OutputWhenFundraisingTokenIsCurrency0() public {

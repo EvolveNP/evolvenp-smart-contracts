@@ -93,12 +93,9 @@ contract FundraisingTokenHook is BaseHook {
      * @param _fundraisingTokenAddress The address of the fundraising token governed by this hook.
      * @param _vault The address of the treasury wallet that receives swap fees (immutable).
      */
-    constructor(
-        address _poolManager,
-        address _fundraisingTokenAddress,
-        address _vault,
-        address _integrationRegistry
-    ) BaseHook(IPoolManager(_poolManager)) {
+    constructor(address _poolManager, address _fundraisingTokenAddress, address _vault, address _integrationRegistry)
+        BaseHook(IPoolManager(_poolManager))
+    {
         fundraisingTokenAddress = _fundraisingTokenAddress;
         launchTimestamp = block.timestamp;
         launchBlock = block.number;

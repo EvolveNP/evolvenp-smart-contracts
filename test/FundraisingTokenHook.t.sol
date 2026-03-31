@@ -88,12 +88,9 @@ contract MockMsgSender {
 }
 
 contract FundraisingTokenHookHarness is FundraisingTokenHook {
-    constructor(
-        address poolManager,
-        address fundraisingToken,
-        address vault,
-        address registry
-    ) FundraisingTokenHook(poolManager, fundraisingToken, vault, registry) {}
+    constructor(address poolManager, address fundraisingToken, address vault, address registry)
+        FundraisingTokenHook(poolManager, fundraisingToken, vault, registry)
+    {}
 
     function validateHookAddress(BaseHook) internal pure override {}
 

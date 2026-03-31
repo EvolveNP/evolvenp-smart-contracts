@@ -89,7 +89,6 @@ contract EmergencyManager is IEmergencyManager {
         endpointFailureThreshold = config.endpointFailureThreshold;
 
         emergencyState = EmergencyState.NORMAL;
-        isReporter[_emergencyMultisig] = true;
 
         uint256 reportersLength = reporters.length;
         for (uint256 i; i < reportersLength; ++i) {

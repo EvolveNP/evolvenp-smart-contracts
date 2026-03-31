@@ -136,10 +136,6 @@ contract EmergencyManagerTest is Test {
         new EmergencyManager(multisig, reporterRegistrar, invalidReporters, validDuration);
     }
 
-    function testEmergencyMultisigIsReporterByDefault() public view {
-        assertTrue(manager.isReporter(multisig));
-    }
-
     function testOnlyEmergencyMultisigCanActivateOrClose() public {
         vm.prank(reporter);
         manager.recordEndpointFailure(uint8(IIntegrationRegistry.Endpoint.PERMIT2));

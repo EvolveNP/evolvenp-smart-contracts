@@ -122,9 +122,7 @@ contract MockFactoryRegistry {
 }
 
 contract FactoryHarness is Factory {
-    constructor(address registry, address emergencyManager, address usdc)
-        Factory(registry, emergencyManager, usdc)
-    {}
+    constructor(address registry, address emergencyManager, address usdc) Factory(registry, emergencyManager, usdc) {}
 
     function exposedGetModifyLiqiuidityParams(
         PoolKey memory key,

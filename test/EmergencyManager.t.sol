@@ -18,13 +18,9 @@ contract EmergencyManagerTest is Test {
         address[] memory reporters = new address[](1);
         reporters[0] = reporter;
 
-        EmergencyManager.Config memory config =
-            EmergencyManager.Config({
-                emergencyDuration: 3 days,
-                quoteFailureThreshold: 2,
-                swapFailureThreshold: 2,
-                endpointFailureThreshold: 1
-            });
+        EmergencyManager.Config memory config = EmergencyManager.Config({
+            emergencyDuration: 3 days, quoteFailureThreshold: 2, swapFailureThreshold: 2, endpointFailureThreshold: 1
+        });
 
         manager = new EmergencyManager(multisig, reporterRegistrar, reporters, config);
     }
@@ -94,13 +90,9 @@ contract EmergencyManagerTest is Test {
 
     function testConstructorRejectsZeroAddresses() public {
         address[] memory reporters = new address[](0);
-        EmergencyManager.Config memory config =
-            EmergencyManager.Config({
-                emergencyDuration: 3 days,
-                quoteFailureThreshold: 2,
-                swapFailureThreshold: 2,
-                endpointFailureThreshold: 1
-            });
+        EmergencyManager.Config memory config = EmergencyManager.Config({
+            emergencyDuration: 3 days, quoteFailureThreshold: 2, swapFailureThreshold: 2, endpointFailureThreshold: 1
+        });
 
         vm.expectRevert(EmergencyManager.ZeroAddress.selector);
         new EmergencyManager(address(0), reporterRegistrar, reporters, config);
@@ -113,24 +105,16 @@ contract EmergencyManagerTest is Test {
         address[] memory invalidReporters = new address[](1);
         invalidReporters[0] = address(0);
 
-        EmergencyManager.Config memory invalidDuration =
-            EmergencyManager.Config({
-                emergencyDuration: 0,
-                quoteFailureThreshold: 2,
-                swapFailureThreshold: 2,
-                endpointFailureThreshold: 1
-            });
+        EmergencyManager.Config memory invalidDuration = EmergencyManager.Config({
+            emergencyDuration: 0, quoteFailureThreshold: 2, swapFailureThreshold: 2, endpointFailureThreshold: 1
+        });
 
         vm.expectRevert(EmergencyManager.InvalidState.selector);
         new EmergencyManager(multisig, reporterRegistrar, new address[](0), invalidDuration);
 
-        EmergencyManager.Config memory validDuration =
-            EmergencyManager.Config({
-                emergencyDuration: 3 days,
-                quoteFailureThreshold: 2,
-                swapFailureThreshold: 2,
-                endpointFailureThreshold: 1
-            });
+        EmergencyManager.Config memory validDuration = EmergencyManager.Config({
+            emergencyDuration: 3 days, quoteFailureThreshold: 2, swapFailureThreshold: 2, endpointFailureThreshold: 1
+        });
 
         vm.expectRevert(EmergencyManager.ZeroAddress.selector);
         new EmergencyManager(multisig, reporterRegistrar, invalidReporters, validDuration);

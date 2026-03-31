@@ -328,7 +328,8 @@ contract Factory is IFactory, Ownable {
         onlySelf
         returns (address hook)
     {
-        hook = IHookDeployer(IIntegrationRegistry(registryAddress).hookDeployer()).deployHook(fundraisingToken, vault, salt);
+        hook = IHookDeployer(IIntegrationRegistry(registryAddress).hookDeployer())
+            .deployHook(fundraisingToken, vault, salt);
     }
 
     function positionManagerMulticall(address positionManager, bytes[] calldata params) external onlySelf {

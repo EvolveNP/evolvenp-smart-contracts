@@ -144,8 +144,13 @@ contract Factory is IFactory, Ownable {
         // set fundraising token addrress in vault
         vault.setFundraisingToken(address(fundraisingToken));
 
-        protocols[address(fundraisingToken)] =
-            FundraisingProtocol(address(fundraisingToken), _underlyingAddress, address(vault), address(0), false);
+        protocols[address(fundraisingToken)] = FundraisingProtocol({
+            fundraisingToken: address(fundraisingToken),
+            underlyingAddress: _underlyingAddress,
+            vault: address(vault),
+            hook: address(0),
+            isLPCreated: false
+        });
 
         emit FundraisingVaultCreated(address(fundraisingToken), address(vault));
     }

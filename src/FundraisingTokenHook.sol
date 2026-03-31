@@ -16,6 +16,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IStateView} from "v4-periphery/src/interfaces/IStateView.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {TruncatedOracle} from "@uniswap/v4-periphery-trunc/libraries/TruncatedOracle.sol";
+import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 
 /**
  * @title FundraisingTokenHook
@@ -55,11 +56,8 @@ contract FundraisingTokenHook is BaseHook {
 
     address public immutable fundraisingTokenAddress; // The address of the fundraising token
     address public immutable vault; // The address of the treasury wallet address
-    address public immutable donationAddress; // The address of the donation wallet address
+    IIntegrationRegistry public immutable integrationRegistry; // current integration endpoints source
     uint256 public constant maximumThreshold = 30e16; // The maximum threshold for the liquidity pool 30% = 30e16
-    address public router; // router address used to swap in treasury and donation wallet
-    address public quoter; // quoter address used to swap in treasury and donation wallet
-    address public stateView; // state view address used to get pool state
     mapping(address => uint256) public lastBuyTimestamp; // The last buy timestamp for each address
 
     // 2% expressed with 18-decimal denominator
@@ -87,7 +85,6 @@ contract FundraisingTokenHook is BaseHook {
      * - The Uniswap V4 `PoolManager` used for managing pool interactions.
      * - The `fundraisingTokenAddress` for which this hook will apply buy/sell rules and tax logic.
      * - The `vault`, which receives collected fees from swaps.
-     * - The `donationAddress`, which may be exempted from certain fee or restriction rules.
      *
      * It also records the deployment `launchTimestamp` and `launchBlock`, which are later
      * used to enforce launch protection (e.g., cooldowns, max buy limits, and block-based restrictions).
@@ -100,17 +97,13 @@ contract FundraisingTokenHook is BaseHook {
         address _poolManager,
         address _fundraisingTokenAddress,
         address _vault,
-        address _router,
-        address _quoter,
-        address _stateView
+        address _integrationRegistry
     ) BaseHook(IPoolManager(_poolManager)) {
         fundraisingTokenAddress = _fundraisingTokenAddress;
         launchTimestamp = block.timestamp;
         launchBlock = block.number;
         vault = _vault;
-        router = _router;
-        quoter = _quoter;
-        stateView = _stateView;
+        integrationRegistry = IIntegrationRegistry(_integrationRegistry);
     }
 
     function observe(PoolKey calldata key, uint32[] calldata secondsAgos)
@@ -124,13 +117,13 @@ contract FundraisingTokenHook is BaseHook {
 
         int24 tick = getCurrentTick(key);
 
-        uint128 liquidity = IStateView(stateView).getLiquidity(key.toId());
+        uint128 liquidity = IStateView(stateView()).getLiquidity(key.toId());
 
         return observations[id].observe(_blockTimestamp(), secondsAgos, tick, state.index, liquidity, state.cardinality);
     }
 
     function getCurrentTick(PoolKey calldata key) public view returns (int24) {
-        (, int24 tick,,) = IStateView(stateView).getSlot0(key.toId());
+        (, int24 tick,,) = IStateView(stateView()).getSlot0(key.toId());
         return tick;
     }
 
@@ -186,7 +179,7 @@ contract FundraisingTokenHook is BaseHook {
         override
         returns (bytes4)
     {
-        bytes32 id = keccak256(abi.encode(key));
+        bytes32 id = PoolId.unwrap(key.toId());
         (states[id].cardinality, states[id].cardinalityNext) = observations[id].initialize(_blockTimestamp(), tick);
         return BaseHook.afterInitialize.selector;
     }
@@ -336,6 +329,7 @@ contract FundraisingTokenHook is BaseHook {
 
             if (isTaxCutEnabled) {
                 feeAmount = (uint256(_amountOut) * TAX_FEE_PERCENTAGE) / TAX_FEE_DENOMINATOR;
+                if (feeAmount >= ((uint256(1) << 127) - 1)) revert FeeToLarge();
 
                 // sends the fee to treasury wallet
                 poolManager.take(Currency.wrap(fundraisingTokenAddress), vault, feeAmount);
@@ -407,11 +401,11 @@ contract FundraisingTokenHook is BaseHook {
      * @return bool Returns `true` if tax should be incurred, otherwise `false`.
      */
     function checkIfTaxIncurred(address sender) internal view returns (bool) {
-        return (getTreasuryBalanceInPerecent() < maximumThreshold) && sender != vault && sender != donationAddress;
+        return (getTreasuryBalanceInPerecent() < maximumThreshold) && sender != vault;
     }
 
     function getMsgSender(address sender) internal view returns (address) {
-        if (sender == quoter || sender == router) {
+        if (sender == quoter() || sender == router()) {
             return IMsgSender(sender).msgSender();
         } else {
             // for antisniping protection we are using tx.origin the EOA account that initiates the transaction
@@ -425,9 +419,9 @@ contract FundraisingTokenHook is BaseHook {
     function _updatePool(PoolKey calldata key) private {
         bytes32 id = PoolId.unwrap(key.toId());
 
-        (, int24 tick,,) = IStateView(stateView).getSlot0(key.toId());
+        (, int24 tick,,) = IStateView(stateView()).getSlot0(key.toId());
 
-        uint128 liquidity = IStateView(stateView).getLiquidity(key.toId());
+        uint128 liquidity = IStateView(stateView()).getLiquidity(key.toId());
 
         (states[id].index, states[id].cardinality) = observations[id].write(
             states[id].index, _blockTimestamp(), tick, liquidity, states[id].cardinality, states[id].cardinalityNext
@@ -436,5 +430,17 @@ contract FundraisingTokenHook is BaseHook {
 
     function _blockTimestamp() internal view virtual returns (uint32) {
         return uint32(block.timestamp);
+    }
+
+    function router() public view returns (address) {
+        return integrationRegistry.router();
+    }
+
+    function quoter() public view returns (address) {
+        return integrationRegistry.quoter();
+    }
+
+    function stateView() public view returns (address) {
+        return integrationRegistry.stateView();
     }
 }

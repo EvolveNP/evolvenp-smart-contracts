@@ -36,13 +36,11 @@ contract HookDeployer {
     }
 
     function deployHook(address fundraisingToken, address vault, bytes32 salt) external onlyFactory returns (address) {
-        address router = integrationRegistry.router();
-        address quoter = integrationRegistry.quoter();
-        address stateView = integrationRegistry.stateView();
         address poolManager = integrationRegistry.poolManager();
 
-        FundraisingTokenHook hook =
-            new FundraisingTokenHook{salt: salt}(poolManager, fundraisingToken, vault, router, quoter, stateView);
+        FundraisingTokenHook hook = new FundraisingTokenHook{salt: salt}(
+            poolManager, fundraisingToken, vault, address(integrationRegistry)
+        );
         return address(hook);
     }
 
@@ -72,13 +70,10 @@ contract HookDeployer {
         IFactory.FundraisingProtocol memory protocol = factory.getProtocol(_fundraisingToken);
 
         if (protocol.fundraisingToken == address(0)) revert ProtocolNotAvailable();
-        address router = integrationRegistry.router();
-        address quoter = integrationRegistry.quoter();
-        address stateView = integrationRegistry.stateView();
         address poolManager = integrationRegistry.poolManager();
         // Mine a salt that will produce a hook address with the correct flags
         bytes memory constructorArgs =
-            abi.encode(poolManager, protocol.fundraisingToken, protocol.vault, router, quoter, stateView);
+            abi.encode(poolManager, protocol.fundraisingToken, protocol.vault, address(integrationRegistry));
         (, bytes32 salt) =
             HookMiner.find(address(this), flags, type(FundraisingTokenHook).creationCode, constructorArgs);
         return salt;

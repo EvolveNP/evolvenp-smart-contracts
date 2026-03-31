@@ -18,6 +18,7 @@ import {BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta
 import {BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {IIntegrationRegistry} from "../src/interfaces/IIntegrationRegistry.sol";
 
 contract MockHookToken is ERC20 {
     constructor() ERC20("Fund", "FUND") {}
@@ -57,6 +58,23 @@ contract MockHookStateView {
     }
 }
 
+contract MockHookRegistry {
+    address public router;
+    address public permit2;
+    address public quoter;
+    address public poolManager;
+    address public positionManager;
+    address public stateView;
+    address public hookDeployer;
+    address public emergencyManager;
+
+    constructor(address router_, address quoter_, address stateView_) {
+        router = router_;
+        quoter = quoter_;
+        stateView = stateView_;
+    }
+}
+
 contract MockMsgSender {
     address internal nextSender;
 
@@ -74,10 +92,8 @@ contract FundraisingTokenHookHarness is FundraisingTokenHook {
         address poolManager,
         address fundraisingToken,
         address vault,
-        address router,
-        address quoter,
-        address stateView
-    ) FundraisingTokenHook(poolManager, fundraisingToken, vault, router, quoter, stateView) {}
+        address registry
+    ) FundraisingTokenHook(poolManager, fundraisingToken, vault, registry) {}
 
     function validateHookAddress(BaseHook) internal pure override {}
 
@@ -138,6 +154,7 @@ contract FundraisingTokenHookTest is Test {
     MockHookStateView internal stateView;
     MockMsgSender internal router;
     MockMsgSender internal quoter;
+    MockHookRegistry internal registry;
     FundraisingTokenHookHarness internal hook;
 
     address internal vault = address(0xA11CE);
@@ -149,10 +166,9 @@ contract FundraisingTokenHookTest is Test {
         stateView = new MockHookStateView();
         router = new MockMsgSender();
         quoter = new MockMsgSender();
+        registry = new MockHookRegistry(address(router), address(quoter), address(stateView));
 
-        hook = new FundraisingTokenHookHarness(
-            address(poolManager), address(token), vault, address(router), address(quoter), address(stateView)
-        );
+        hook = new FundraisingTokenHookHarness(address(poolManager), address(token), vault, address(registry));
 
         token.mint(user, 1_000_000 ether);
         stateView.setState(0, 1_000_000);
@@ -272,6 +288,19 @@ contract FundraisingTokenHookTest is Test {
         hook.exposedBeforeSwap(user, key, params, bytes(""));
     }
 
+    function testAfterSwapHandlesMaxDeltaWithoutOverflow() public {
+        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        hook.exposedAfterInitialize(key, 0, 0);
+
+        vm.roll(block.number + 20);
+        vm.warp(block.timestamp + 2 hours);
+
+        SwapParams memory buying = SwapParams({zeroForOne: false, amountSpecified: -10 ether, sqrtPriceLimitX96: 0});
+        (, int128 fee) = hook.exposedAfterSwap(user, key, buying, toBalanceDelta(type(int128).max, 0), bytes(""));
+
+        assertEq(fee, int128(type(int128).max / 100));
+    }
+
     function testAfterSwapNonBuyingAndZeroOutputBranches() public {
         PoolKey memory key = _poolKey(address(token), address(0x1234));
         hook.exposedAfterInitialize(key, 0, 0);
@@ -315,11 +344,11 @@ contract FundraisingTokenHookTest is Test {
         vm.warp(block.timestamp + 2 hours);
 
         SwapParams memory buying = SwapParams({zeroForOne: false, amountSpecified: -10 ether, sqrtPriceLimitX96: 0});
-        router.setMsgSender(address(0));
+        router.setMsgSender(vault);
 
-        (, int128 feeFromZeroSender) =
+        (, int128 feeFromVaultSender) =
             hook.exposedAfterSwap(address(router), key, buying, toBalanceDelta(100 ether, 0), bytes(""));
-        assertEq(feeFromZeroSender, 0);
+        assertEq(feeFromVaultSender, 0);
 
         token.mint(vault, 500_000 ether);
         router.setMsgSender(user);
@@ -331,7 +360,7 @@ contract FundraisingTokenHookTest is Test {
     function testTreasuryPercentTaxFlagAndMsgSenderBranches() public {
         assertEq(hook.exposedTreasuryBalancePercent(), 0);
         assertTrue(hook.exposedCheckIfTaxIncurred(user));
-        assertFalse(hook.exposedCheckIfTaxIncurred(address(0)));
+        assertFalse(hook.exposedCheckIfTaxIncurred(vault));
 
         router.setMsgSender(user);
         quoter.setMsgSender(vault);

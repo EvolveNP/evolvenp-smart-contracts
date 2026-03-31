@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {EmergencyManager} from "../src/EmergencyManager.sol";
 import {IEmergencyManager} from "../src/interfaces/IEmergencyManager.sol";
+import {IIntegrationRegistry} from "../src/interfaces/IIntegrationRegistry.sol";
 
 contract EmergencyManagerTest is Test {
     address internal multisig = address(0xA11CE);
@@ -17,11 +18,13 @@ contract EmergencyManagerTest is Test {
         address[] memory reporters = new address[](1);
         reporters[0] = reporter;
 
-        EmergencyManager.Config memory config = EmergencyManager.Config({
-            emergencyDuration: 3 days,
-            quoteFailureThreshold: 2,
-            swapFailureThreshold: 2
-        });
+        EmergencyManager.Config memory config =
+            EmergencyManager.Config({
+                emergencyDuration: 3 days,
+                quoteFailureThreshold: 2,
+                swapFailureThreshold: 2,
+                endpointFailureThreshold: 1
+            });
 
         manager = new EmergencyManager(multisig, reporterRegistrar, reporters, config);
     }
@@ -60,8 +63,11 @@ contract EmergencyManagerTest is Test {
     }
 
     function testEndpointFailureArmsEmergency() public {
+        vm.expectEmit(address(manager));
+        emit EmergencyManager.EndpointFailureRecorded(IIntegrationRegistry.Endpoint.PERMIT2);
+
         vm.prank(reporter);
-        manager.recordEndpointFailure();
+        manager.recordEndpointFailure(uint8(IIntegrationRegistry.Endpoint.PERMIT2));
 
         assertEq(uint256(manager.mode()), uint256(IEmergencyManager.EmergencyState.ARMED));
         assertEq(manager.armedReasonFlags(), manager.TRIGGER_ENDPOINT_FAILURE());
@@ -88,11 +94,13 @@ contract EmergencyManagerTest is Test {
 
     function testConstructorRejectsZeroAddresses() public {
         address[] memory reporters = new address[](0);
-        EmergencyManager.Config memory config = EmergencyManager.Config({
-            emergencyDuration: 3 days,
-            quoteFailureThreshold: 2,
-            swapFailureThreshold: 2
-        });
+        EmergencyManager.Config memory config =
+            EmergencyManager.Config({
+                emergencyDuration: 3 days,
+                quoteFailureThreshold: 2,
+                swapFailureThreshold: 2,
+                endpointFailureThreshold: 1
+            });
 
         vm.expectRevert(EmergencyManager.ZeroAddress.selector);
         new EmergencyManager(address(0), reporterRegistrar, reporters, config);
@@ -105,20 +113,24 @@ contract EmergencyManagerTest is Test {
         address[] memory invalidReporters = new address[](1);
         invalidReporters[0] = address(0);
 
-        EmergencyManager.Config memory invalidDuration = EmergencyManager.Config({
-            emergencyDuration: 0,
-            quoteFailureThreshold: 2,
-            swapFailureThreshold: 2
-        });
+        EmergencyManager.Config memory invalidDuration =
+            EmergencyManager.Config({
+                emergencyDuration: 0,
+                quoteFailureThreshold: 2,
+                swapFailureThreshold: 2,
+                endpointFailureThreshold: 1
+            });
 
         vm.expectRevert(EmergencyManager.InvalidState.selector);
         new EmergencyManager(multisig, reporterRegistrar, new address[](0), invalidDuration);
 
-        EmergencyManager.Config memory validDuration = EmergencyManager.Config({
-            emergencyDuration: 3 days,
-            quoteFailureThreshold: 2,
-            swapFailureThreshold: 2
-        });
+        EmergencyManager.Config memory validDuration =
+            EmergencyManager.Config({
+                emergencyDuration: 3 days,
+                quoteFailureThreshold: 2,
+                swapFailureThreshold: 2,
+                endpointFailureThreshold: 1
+            });
 
         vm.expectRevert(EmergencyManager.ZeroAddress.selector);
         new EmergencyManager(multisig, reporterRegistrar, invalidReporters, validDuration);
@@ -130,7 +142,7 @@ contract EmergencyManagerTest is Test {
 
     function testOnlyEmergencyMultisigCanActivateOrClose() public {
         vm.prank(reporter);
-        manager.recordEndpointFailure();
+        manager.recordEndpointFailure(uint8(IIntegrationRegistry.Endpoint.PERMIT2));
 
         vm.expectRevert(EmergencyManager.NotEmergencyMultisig.selector);
         manager.activateEmergency();
@@ -153,7 +165,7 @@ contract EmergencyManagerTest is Test {
 
     function testCloseEmergencyResetsState() public {
         vm.prank(reporter);
-        manager.recordEndpointFailure();
+        manager.recordEndpointFailure(uint8(IIntegrationRegistry.Endpoint.PERMIT2));
 
         vm.prank(multisig);
         manager.activateEmergency();
@@ -212,7 +224,7 @@ contract EmergencyManagerTest is Test {
 
     function testArmedReasonFlagsAccumulateAcrossTriggerTypes() public {
         vm.prank(reporter);
-        manager.recordEndpointFailure();
+        manager.recordEndpointFailure(uint8(IIntegrationRegistry.Endpoint.PERMIT2));
 
         vm.startPrank(reporter);
         manager.recordQuoteFailure();

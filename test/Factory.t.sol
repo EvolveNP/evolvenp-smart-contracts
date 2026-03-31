@@ -8,6 +8,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import {Factory} from "../src/Factory.sol";
 import {IFactory} from "../src/interfaces/IFactory.sol";
+import {IIntegrationRegistry} from "../src/interfaces/IIntegrationRegistry.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
@@ -31,16 +32,13 @@ contract MockFactoryToken is ERC20 {
 contract MockFactoryEmergencyManager {
     address public lastReporter;
     bool public lastAllowed;
-    uint256 public endpointFailureCalls;
 
     function setReporter(address reporter, bool allowed) external {
         lastReporter = reporter;
         lastAllowed = allowed;
     }
 
-    function recordEndpointFailure() external {
-        ++endpointFailureCalls;
-    }
+    function recordEndpointFailure(uint8) external {}
 }
 
 contract MockFactoryHookDeployer {
@@ -69,8 +67,14 @@ contract MockFactoryPermit2 {
     address public lastSpender;
     uint160 public lastAmount;
     uint48 public lastExpiration;
+    bool public shouldRevert;
+
+    function setShouldRevert(bool revert_) external {
+        shouldRevert = revert_;
+    }
 
     function approve(address token, address spender, uint160 amount, uint48 expiration) external {
+        if (shouldRevert) revert("permit2 failed");
         lastToken = token;
         lastSpender = spender;
         lastAmount = amount;
@@ -288,6 +292,33 @@ contract FactoryTest is Test {
         vm.stopPrank();
     }
 
+    function testCreatePoolRevertsWhenPermit2Fails() public {
+        vm.recordLogs();
+        vm.prank(protocolAdmin);
+        factory.createFundraisingVault(
+            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
+        );
+        (address fundraisingToken,) = _decodeCreatedVault();
+
+        hookDeployer.configure(fakeHook, false);
+        permit2.setShouldRevert(true);
+        usdc.mint(protocolAdmin, 100e6);
+
+        vm.expectCall(
+            address(emergencyManager),
+            abi.encodeCall(
+                MockFactoryEmergencyManager.recordEndpointFailure, (uint8(IIntegrationRegistry.Endpoint.PERMIT2))
+            )
+        );
+
+        vm.startPrank(protocolAdmin);
+        usdc.approve(address(factory), type(uint256).max);
+        MockFactoryToken(fundraisingToken).approve(address(factory), type(uint256).max);
+        vm.expectRevert(Factory.PositionManagerCallFailed.selector);
+        factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
+        vm.stopPrank();
+    }
+
     function testCreatePoolRevertsWhenPositionManagerFails() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
@@ -299,6 +330,14 @@ contract FactoryTest is Test {
         hookDeployer.configure(fakeHook, false);
         positionManager.setShouldRevert(true);
         usdc.mint(protocolAdmin, 100e6);
+
+        vm.expectCall(
+            address(emergencyManager),
+            abi.encodeCall(
+                MockFactoryEmergencyManager.recordEndpointFailure,
+                (uint8(IIntegrationRegistry.Endpoint.POSITION_MANAGER))
+            )
+        );
 
         vm.startPrank(protocolAdmin);
         usdc.approve(address(factory), type(uint256).max);

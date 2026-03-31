@@ -230,7 +230,6 @@ contract Factory is IFactory, Ownable {
         ) {
             hook = deployedHook;
         } catch {
-            _tryRecordEndpointFailure();
             revert HookDeploymentFailed();
         }
 
@@ -250,9 +249,17 @@ contract Factory is IFactory, Ownable {
         uint256 deadline = block.timestamp + 1000;
 
         IERC20Metadata(_currency0).approve(address(permit2), amount0);
-        IPermit2(permit2).approve(_currency0, positionManager, uint160(amount0), uint48(deadline));
+        try IPermit2(permit2).approve(_currency0, positionManager, uint160(amount0), uint48(deadline)) {}
+        catch {
+            _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint.PERMIT2);
+            revert PositionManagerCallFailed();
+        }
         IERC20Metadata(_currency1).approve(address(permit2), amount1);
-        IPermit2(permit2).approve(_currency1, positionManager, uint160(amount1), uint48(deadline));
+        try IPermit2(permit2).approve(_currency1, positionManager, uint160(amount1), uint48(deadline)) {}
+        catch {
+            _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint.PERMIT2);
+            revert PositionManagerCallFailed();
+        }
 
         _protocol.isLPCreated = true;
         _protocol.hook = hook;
@@ -262,7 +269,7 @@ contract Factory is IFactory, Ownable {
 
         try this.positionManagerMulticall(positionManager, params) {}
         catch {
-            _tryRecordEndpointFailure();
+            _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint.POSITION_MANAGER);
             revert PositionManagerCallFailed();
         }
 
@@ -330,7 +337,7 @@ contract Factory is IFactory, Ownable {
         IPositionManager(positionManager).multicall(params);
     }
 
-    function _tryRecordEndpointFailure() internal {
-        try IEmergencyManager(emergencyManagerAddress).recordEndpointFailure() {} catch {}
+    function _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint endpoint) internal {
+        try IEmergencyManager(emergencyManagerAddress).recordEndpointFailure(uint8(endpoint)) {} catch {}
     }
 }

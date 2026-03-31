@@ -8,6 +8,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IFactory} from "./interfaces/IFactory.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IHook} from "./interfaces/IHook.sol";
+import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 
 contract Vault is Swap {
     using SafeERC20 for IERC20;
@@ -223,6 +224,6 @@ contract Vault is Swap {
     }
 
     function _tryRecordEndpointFailure(IEmergencyManager manager) internal {
-        try manager.recordEndpointFailure() {} catch {}
+        try manager.recordEndpointFailure(uint8(IIntegrationRegistry.Endpoint.STATE_VIEW)) {} catch {}
     }
 }

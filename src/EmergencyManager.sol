@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
+import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 
 contract EmergencyManager is IEmergencyManager {
     uint256 public constant TRIGGER_QUOTE_FAILURE = 1 << 0;
@@ -18,6 +19,7 @@ contract EmergencyManager is IEmergencyManager {
         uint64 emergencyDuration;
         uint64 quoteFailureThreshold;
         uint64 swapFailureThreshold;
+        uint64 endpointFailureThreshold;
     }
 
     struct FailureCounters {
@@ -29,6 +31,7 @@ contract EmergencyManager is IEmergencyManager {
     uint256 public immutable emergencyDuration;
     uint256 public immutable quoteFailureThreshold;
     uint256 public immutable swapFailureThreshold;
+    uint256 public immutable endpointFailureThreshold;
 
     EmergencyState internal emergencyState;
     uint256 public emergencyExpiresAt;
@@ -36,6 +39,7 @@ contract EmergencyManager is IEmergencyManager {
 
     FailureCounters public quoteFailures;
     FailureCounters public swapFailures;
+    FailureCounters public endpointFailures;
 
     mapping(address => bool) public isReporter;
 
@@ -43,6 +47,7 @@ contract EmergencyManager is IEmergencyManager {
     event EmergencyActivated(uint256 expiresAt);
     event EmergencyExited();
     event ReporterConfigured(address reporter, bool allowed);
+    event EndpointFailureRecorded(IIntegrationRegistry.Endpoint endpoint);
 
     modifier onlyReporter() {
         if (!isReporter[msg.sender]) revert NotAuthorizedReporter();
@@ -81,6 +86,7 @@ contract EmergencyManager is IEmergencyManager {
         emergencyDuration = config.emergencyDuration;
         quoteFailureThreshold = config.quoteFailureThreshold;
         swapFailureThreshold = config.swapFailureThreshold;
+        endpointFailureThreshold = config.endpointFailureThreshold;
 
         emergencyState = EmergencyState.NORMAL;
         isReporter[_emergencyMultisig] = true;
@@ -127,7 +133,7 @@ contract EmergencyManager is IEmergencyManager {
 
     function recordQuoteFailure() public override onlyReporter syncBefore {
         _recordFailure(quoteFailures);
-        if (quoteFailureThreshold != 0 && quoteFailures.consecutive >= quoteFailureThreshold) {
+        if (quoteFailures.consecutive >= quoteFailureThreshold) {
             _armEmergency(TRIGGER_QUOTE_FAILURE);
         }
     }
@@ -138,7 +144,7 @@ contract EmergencyManager is IEmergencyManager {
 
     function recordSwapFailure() public override onlyReporter syncBefore {
         _recordFailure(swapFailures);
-        if (swapFailureThreshold != 0 && swapFailures.consecutive >= swapFailureThreshold) {
+        if (swapFailures.consecutive >= swapFailureThreshold) {
             _armEmergency(TRIGGER_SWAP_FAILURE);
         }
     }
@@ -147,8 +153,12 @@ contract EmergencyManager is IEmergencyManager {
         swapFailures.consecutive = 0;
     }
 
-    function recordEndpointFailure() external override onlyReporter syncBefore {
-        _armEmergency(TRIGGER_ENDPOINT_FAILURE);
+    function recordEndpointFailure(uint8 endpoint) external override onlyReporter syncBefore {
+        emit EndpointFailureRecorded(IIntegrationRegistry.Endpoint(endpoint));
+        _recordFailure(endpointFailures);
+        if (endpointFailures.consecutive >= endpointFailureThreshold) {
+            _armEmergency(TRIGGER_ENDPOINT_FAILURE);
+        }
     }
 
     function _recordFailure(FailureCounters storage counters) internal {

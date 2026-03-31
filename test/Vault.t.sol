@@ -6,6 +6,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {Vault} from "../src/Vault.sol";
+import {IIntegrationRegistry} from "../src/interfaces/IIntegrationRegistry.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
@@ -33,6 +34,7 @@ contract MockVaultEmergencyManager {
     uint256 public quoteSuccessCount;
     uint256 public swapFailureCount;
     uint256 public swapSuccessCount;
+    uint8 public lastEndpointFailure;
 
     function setEmergencyActive(bool active) external {
         emergencyActive = active;
@@ -58,7 +60,8 @@ contract MockVaultEmergencyManager {
         ++swapSuccessCount;
     }
 
-    function recordEndpointFailure() external {
+    function recordEndpointFailure(uint8 endpoint) external {
+        lastEndpointFailure = endpoint;
     }
 }
 
@@ -237,6 +240,13 @@ contract VaultTest is Test {
         vm.warp(block.timestamp + 1 days);
         fundraisingToken.mint(address(vault), 100);
         hook.configure(0, 0, 0, true);
+
+        vm.expectCall(
+            address(emergencyManager),
+            abi.encodeCall(
+                MockVaultEmergencyManager.recordEndpointFailure, (uint8(IIntegrationRegistry.Endpoint.STATE_VIEW))
+            )
+        );
 
         vm.expectRevert(Vault.SellCheckFailed.selector);
         vault.executeMonthlyEvent();

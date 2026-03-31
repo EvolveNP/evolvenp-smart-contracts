@@ -36,7 +36,6 @@ contract Factory is IFactory, Ownable {
     address public immutable registryAddress;
     address public immutable emergencyManagerAddress;
     address public immutable usdcAddress;
-    IHookDeployer public immutable hookDeployer;
 
     /**
      * @notice Mapping storing fundraising protocol details by non-profit owner address.
@@ -94,16 +93,14 @@ contract Factory is IFactory, Ownable {
         _;
     }
 
-    constructor(address _registryAddress, address _emergencyManagerAddress, address _hookDeployer, address _usdcAddress)
+    constructor(address _registryAddress, address _emergencyManagerAddress, address _usdcAddress)
         Ownable(msg.sender)
         nonZeroAddress(_registryAddress)
         nonZeroAddress(_emergencyManagerAddress)
-        nonZeroAddress(_hookDeployer)
         nonZeroAddress(_usdcAddress)
     {
         registryAddress = _registryAddress;
         emergencyManagerAddress = _emergencyManagerAddress;
-        hookDeployer = IHookDeployer(_hookDeployer);
         usdcAddress = _usdcAddress;
     }
 
@@ -230,6 +227,7 @@ contract Factory is IFactory, Ownable {
         ) {
             hook = deployedHook;
         } catch {
+            _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint.HOOK_DEPLOYER);
             revert HookDeploymentFailed();
         }
 
@@ -330,7 +328,7 @@ contract Factory is IFactory, Ownable {
         onlySelf
         returns (address hook)
     {
-        hook = hookDeployer.deployHook(fundraisingToken, vault, salt);
+        hook = IHookDeployer(IIntegrationRegistry(registryAddress).hookDeployer()).deployHook(fundraisingToken, vault, salt);
     }
 
     function positionManagerMulticall(address positionManager, bytes[] calldata params) external onlySelf {

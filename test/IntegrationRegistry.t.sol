@@ -27,6 +27,7 @@ contract IntegrationRegistryTest is Test {
     MockEndpoint internal poolManager;
     MockEndpoint internal positionManager;
     MockEndpoint internal stateView;
+    MockEndpoint internal hookDeployer;
 
     IntegrationRegistry internal registry;
 
@@ -38,6 +39,7 @@ contract IntegrationRegistryTest is Test {
         poolManager = new MockEndpoint();
         positionManager = new MockEndpoint();
         stateView = new MockEndpoint();
+        hookDeployer = new MockEndpoint();
 
         registry = new IntegrationRegistry(
             address(router),
@@ -46,6 +48,7 @@ contract IntegrationRegistryTest is Test {
             address(poolManager),
             address(positionManager),
             address(stateView),
+            address(hookDeployer),
             address(emergencyState)
         );
     }
@@ -59,6 +62,7 @@ contract IntegrationRegistryTest is Test {
             address(poolManager),
             address(positionManager),
             address(stateView),
+            address(hookDeployer),
             address(emergencyState)
         );
     }
@@ -92,6 +96,7 @@ contract IntegrationRegistryTest is Test {
         address newPoolManager = _allowlistedEndpoint(IntegrationRegistry.Endpoint.POOL_MANAGER);
         address newPositionManager = _allowlistedEndpoint(IntegrationRegistry.Endpoint.POSITION_MANAGER);
         address newStateView = _allowlistedEndpoint(IntegrationRegistry.Endpoint.STATE_VIEW);
+        address newHookDeployer = _allowlistedEndpoint(IntegrationRegistry.Endpoint.HOOK_DEPLOYER);
 
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.ROUTER, newRouter);
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.PERMIT2, newPermit2);
@@ -99,6 +104,7 @@ contract IntegrationRegistryTest is Test {
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.POOL_MANAGER, newPoolManager);
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.POSITION_MANAGER, newPositionManager);
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.STATE_VIEW, newStateView);
+        registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.HOOK_DEPLOYER, newHookDeployer);
 
         assertEq(registry.router(), newRouter);
         assertEq(registry.permit2(), newPermit2);
@@ -106,6 +112,7 @@ contract IntegrationRegistryTest is Test {
         assertEq(registry.poolManager(), newPoolManager);
         assertEq(registry.positionManager(), newPositionManager);
         assertEq(registry.stateView(), newStateView);
+        assertEq(registry.hookDeployer(), newHookDeployer);
     }
 
     function testSetAllowedAddressCanRemoveAddress() public {

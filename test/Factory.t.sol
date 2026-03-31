@@ -107,11 +107,13 @@ contract MockFactoryRegistry {
     address public poolManager;
     address public positionManager;
     address public stateView;
+    address public hookDeployer;
     address public emergencyManager;
 
-    constructor(address _permit2, address _positionManager) {
+    constructor(address _permit2, address _positionManager, address _hookDeployer) {
         permit2 = _permit2;
         positionManager = _positionManager;
+        hookDeployer = _hookDeployer;
     }
 
     function isAllowedCodehash(uint8, bytes32) external pure returns (bool) {
@@ -120,8 +122,8 @@ contract MockFactoryRegistry {
 }
 
 contract FactoryHarness is Factory {
-    constructor(address registry, address emergencyManager, address hookDeployer, address usdc)
-        Factory(registry, emergencyManager, hookDeployer, usdc)
+    constructor(address registry, address emergencyManager, address usdc)
+        Factory(registry, emergencyManager, usdc)
     {}
 
     function exposedGetModifyLiqiuidityParams(
@@ -154,15 +156,15 @@ contract FactoryTest is Test {
         hookDeployer = new MockFactoryHookDeployer();
         permit2 = new MockFactoryPermit2();
         positionManager = new MockFactoryPositionManager();
-        registry = new MockFactoryRegistry(address(permit2), address(positionManager));
+        registry = new MockFactoryRegistry(address(permit2), address(positionManager), address(hookDeployer));
 
         vm.prank(protocolAdmin);
-        factory = new FactoryHarness(address(registry), address(emergencyManager), address(hookDeployer), address(usdc));
+        factory = new FactoryHarness(address(registry), address(emergencyManager), address(usdc));
     }
 
     function testConstructorRejectsZeroAddresses() public {
         vm.expectRevert(Factory.ZeroAddress.selector);
-        new FactoryHarness(address(0), address(emergencyManager), address(hookDeployer), address(usdc));
+        new FactoryHarness(address(0), address(emergencyManager), address(usdc));
     }
 
     function testCreateFundraisingVaultOnlyOwner() public {
@@ -283,6 +285,13 @@ contract FactoryTest is Test {
 
         hookDeployer.configure(address(0), true);
         usdc.mint(protocolAdmin, 100e6);
+
+        vm.expectCall(
+            address(emergencyManager),
+            abi.encodeCall(
+                MockFactoryEmergencyManager.recordEndpointFailure, (uint8(IIntegrationRegistry.Endpoint.HOOK_DEPLOYER))
+            )
+        );
 
         vm.startPrank(protocolAdmin);
         usdc.approve(address(factory), type(uint256).max);

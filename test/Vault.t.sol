@@ -6,6 +6,8 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {Vault} from "../src/Vault.sol";
+import {Swap} from "../src/abstracts/Swap.sol";
+import {IIntegrationRegistry} from "../src/interfaces/IIntegrationRegistry.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
@@ -30,8 +32,10 @@ contract MockERC20Token is ERC20 {
 contract MockVaultEmergencyManager {
     bool internal emergencyActive;
     uint256 public quoteFailureCount;
+    uint256 public quoteSuccessCount;
     uint256 public swapFailureCount;
-    uint256 public endpointFailureCount;
+    uint256 public swapSuccessCount;
+    uint8 public lastEndpointFailure;
 
     function setEmergencyActive(bool active) external {
         emergencyActive = active;
@@ -45,12 +49,20 @@ contract MockVaultEmergencyManager {
         ++quoteFailureCount;
     }
 
+    function recordQuoteSuccess() external {
+        ++quoteSuccessCount;
+    }
+
     function recordSwapFailure() external {
         ++swapFailureCount;
     }
 
-    function recordEndpointFailure() external {
-        ++endpointFailureCount;
+    function recordSwapSuccess() external {
+        ++swapSuccessCount;
+    }
+
+    function recordEndpointFailure(uint8 endpoint) external {
+        lastEndpointFailure = endpoint;
     }
 }
 
@@ -213,6 +225,23 @@ contract VaultTest is Test {
         vault.executeMonthlyEvent();
     }
 
+    function testExecuteMonthlyEventRevertsWhenFundraisingTokenIsNotConfigured() public {
+        Vault unconfiguredFundraisingVault = new Vault(
+            address(usdc),
+            1 days,
+            beneficiaries,
+            5e17,
+            address(registry),
+            address(emergencyManager),
+            100,
+            address(factory)
+        );
+
+        vm.warp(block.timestamp + 1 days);
+        vm.expectRevert(Vault.FundraisingTokenNotConfigured.selector);
+        unconfiguredFundraisingVault.executeMonthlyEvent();
+    }
+
     function testExecuteMonthlyEventRevertsWhenNotDue() public {
         vm.expectRevert(Vault.NotDue.selector);
         vault.executeMonthlyEvent();
@@ -230,8 +259,16 @@ contract VaultTest is Test {
         fundraisingToken.mint(address(vault), 100);
         hook.configure(0, 0, 0, true);
 
-        vm.expectRevert(Vault.SellCheckFailed.selector);
+        vm.expectCall(
+            address(emergencyManager),
+            abi.encodeCall(
+                MockVaultEmergencyManager.recordEndpointFailure, (uint8(IIntegrationRegistry.Endpoint.STATE_VIEW))
+            )
+        );
+
         vault.executeMonthlyEvent();
+
+        assertEq(vault.lastSuccessAt(), 0);
     }
 
     function testExecuteMonthlyEventRevertsWhenPriceIsUnsafe() public {
@@ -249,8 +286,26 @@ contract VaultTest is Test {
         hook.configure(0, 0, 0, false);
         quoter.setQuote(0, true);
 
-        vm.expectRevert(Vault.QuoteFailed.selector);
         vault.executeMonthlyEvent();
+
+        assertEq(emergencyManager.quoteFailureCount(), 1);
+        assertEq(vault.lastSuccessAt(), 0);
+    }
+
+    function testExecuteMonthlyEventRecordsQuoteAndSwapSuccess() public {
+        vm.warp(block.timestamp + 1 days);
+        fundraisingToken.mint(address(vault), 200);
+        hook.configure(0, 0, 0, false);
+        quoter.setQuote(95, false);
+        router.setSwapResult(address(usdc), 95, false);
+        usdc.mint(address(router), 95);
+
+        vault.executeMonthlyEvent();
+
+        assertEq(emergencyManager.quoteSuccessCount(), 1);
+        assertEq(emergencyManager.swapSuccessCount(), 1);
+        assertEq(emergencyManager.quoteFailureCount(), 0);
+        assertEq(emergencyManager.swapFailureCount(), 0);
     }
 
     function testExecuteMonthlyEventRecordsSwapFailure() public {
@@ -260,7 +315,96 @@ contract VaultTest is Test {
         quoter.setQuote(150, false);
         router.setSwapResult(address(usdc), 0, true);
 
-        vm.expectRevert(Vault.SwapFailed.selector);
+        vault.executeMonthlyEvent();
+
+        assertEq(emergencyManager.swapFailureCount(), 1);
+        assertEq(vault.lastSuccessAt(), 0);
+    }
+
+    function testConstructorRejectsInvalidConfig() public {
+        vm.expectRevert(Swap.ZeroAddress.selector);
+        new Vault(
+            address(0), 1 days, beneficiaries, 5e17, address(registry), address(emergencyManager), 100, address(factory)
+        );
+
+        vm.expectRevert(Vault.InvalidInterval.selector);
+        new Vault(
+            address(usdc), 0, beneficiaries, 5e17, address(registry), address(emergencyManager), 100, address(factory)
+        );
+
+        vm.expectRevert(Vault.InvalidSwapPercentage.selector);
+        new Vault(
+            address(usdc), 1 days, beneficiaries, 0, address(registry), address(emergencyManager), 100, address(factory)
+        );
+
+        vm.expectRevert(Vault.InvalidSwapPercentage.selector);
+        new Vault(
+            address(usdc),
+            1 days,
+            beneficiaries,
+            1e18 + 1,
+            address(registry),
+            address(emergencyManager),
+            100,
+            address(factory)
+        );
+    }
+
+    function testExecuteMonthlyEventRevertsWhenHookIsNotConfigured() public {
+        Vault unconfiguredHookVault = new Vault(
+            address(usdc),
+            1 days,
+            beneficiaries,
+            5e17,
+            address(registry),
+            address(emergencyManager),
+            100,
+            address(factory)
+        );
+
+        vm.prank(address(factory));
+        unconfiguredHookVault.setFundraisingToken(address(fundraisingToken));
+
+        vm.warp(block.timestamp + 1 days);
+        fundraisingToken.mint(address(unconfiguredHookVault), 100);
+
+        vm.expectRevert(Vault.HookNotConfigured.selector);
+        unconfiguredHookVault.executeMonthlyEvent();
+    }
+
+    function testExecuteMonthlyEventRevertsWhenPoolIsNotConfigured() public {
+        factory.setPoolKey(
+            PoolKey({
+                currency0: Currency.wrap(address(0x1111)),
+                currency1: Currency.wrap(address(usdc)),
+                fee: 0,
+                tickSpacing: 1,
+                hooks: IHooks(address(0))
+            })
+        );
+
+        vm.warp(block.timestamp + 1 days);
+        fundraisingToken.mint(address(vault), 100);
+
+        vm.expectRevert(Vault.PoolNotConfigured.selector);
+        vault.executeMonthlyEvent();
+    }
+
+    function testExecuteMonthlyEventRevertsWhenPoolUsesWrongUnderlyingToken() public {
+        factory.setPoolKey(
+            PoolKey({
+                currency0: Currency.wrap(address(fundraisingToken)),
+                currency1: Currency.wrap(address(0x2222)),
+                fee: 0,
+                tickSpacing: 1,
+                hooks: IHooks(address(0))
+            })
+        );
+
+        vm.warp(block.timestamp + 1 days);
+        fundraisingToken.mint(address(vault), 100);
+
+        vm.expectRevert(Vault.PoolNotConfigured.selector);
         vault.executeMonthlyEvent();
     }
 
@@ -372,6 +516,28 @@ contract VaultTest is Test {
 
         hook.configure(0, 0, 500, false);
         assertFalse(vault.shouldAllowSell());
+
+        hook.configure(0, 0, 100, false);
+        assertTrue(vault.shouldAllowSell());
+    }
+
+    function testShouldAllowSellRevertsWithoutHookAndReturnsTrueForCurrencyZeroPath() public {
+        Vault noHookVault = new Vault(
+            address(usdc),
+            1 days,
+            beneficiaries,
+            5e17,
+            address(registry),
+            address(emergencyManager),
+            100,
+            address(factory)
+        );
+
+        vm.prank(address(factory));
+        noHookVault.setFundraisingToken(address(fundraisingToken));
+
+        vm.expectRevert(Vault.HookNotConfigured.selector);
+        noHookVault.shouldAllowSell();
 
         hook.configure(0, 0, 100, false);
         assertTrue(vault.shouldAllowSell());

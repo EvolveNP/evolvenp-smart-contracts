@@ -9,7 +9,7 @@ interface IIntegrationRegistry {
         POOL_MANAGER,
         POSITION_MANAGER,
         STATE_VIEW,
-        EMERGENCY_MANAGER
+        HOOK_DEPLOYER
     }
 
     function router() external view returns (address);
@@ -23,6 +23,8 @@ interface IIntegrationRegistry {
     function positionManager() external view returns (address);
 
     function stateView() external view returns (address);
+
+    function hookDeployer() external view returns (address);
 
     function emergencyManager() external view returns (address);
 

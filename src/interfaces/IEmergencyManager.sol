@@ -22,9 +22,13 @@ interface IEmergencyManager {
 
     function syncState() external returns (EmergencyState);
 
-    function recordEndpointFailure() external;
+    function recordEndpointFailure(uint8 endpoint) external;
 
     function recordQuoteFailure() external;
 
+    function recordQuoteSuccess() external;
+
     function recordSwapFailure() external;
+
+    function recordSwapSuccess() external;
 }

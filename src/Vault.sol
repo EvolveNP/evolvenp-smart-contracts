@@ -8,6 +8,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IFactory} from "./interfaces/IFactory.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IHook} from "./interfaces/IHook.sol";
+import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 
 contract Vault is Swap {
     using SafeERC20 for IERC20;
@@ -15,6 +16,8 @@ contract Vault is Swap {
      * Errors
      */
     error EmegerncyIsActive();
+    error InvalidInterval();
+    error InvalidSwapPercentage();
     error NotDue();
     error InsufficientBalance();
     error UnsafePrice();
@@ -26,6 +29,9 @@ contract Vault is Swap {
     error SellCheckFailed();
     error QuoteFailed();
     error SwapFailed();
+    error FundraisingTokenNotConfigured();
+    error HookNotConfigured();
+    error PoolNotConfigured();
 
     address public fundraisingToken; // The address of the fundraising token
     address public immutable underlyingAsset; // The address of the underlying asset
@@ -47,6 +53,7 @@ contract Vault is Swap {
      * @dev Emitted when funds are transferred to a non-profit recipient.
      */
     event FundsTransferredToNonProfit(address recipient, uint256 amount);
+    event MonthlyExecutionFailed(bytes4 reason);
 
     modifier onlyFactory() {
         if (msg.sender != factoryAddress) revert NotFactory();
@@ -67,7 +74,14 @@ contract Vault is Swap {
         address _emergencyManager,
         uint256 _minTokenBalanceToExecute,
         address _factoryAddress
-    ) Swap(_integrationRegistry) {
+    )
+        Swap(_integrationRegistry)
+        nonZeroAddress(_underlyingAsset)
+        nonZeroAddress(_emergencyManager)
+        nonZeroAddress(_factoryAddress)
+    {
+        if (_intervalSeconds == 0) revert InvalidInterval();
+        if (_swapPercentage == 0 || _swapPercentage > 1e18) revert InvalidSwapPercentage();
         underlyingAsset = _underlyingAsset;
         intervalSeconds = _intervalSeconds;
         beneficiaries = _beneficiaries;
@@ -81,14 +95,18 @@ contract Vault is Swap {
         IEmergencyManager manager = IEmergencyManager(emergencyManager);
 
         if (manager.isEmergencyActive()) revert EmegerncyIsActive();
+        if (fundraisingToken == address(0)) revert FundraisingTokenNotConfigured();
         if (block.timestamp < lastSuccessAt + intervalSeconds) revert NotDue();
         if (IERC20(fundraisingToken).balanceOf(address(this)) < minTokenBalanceToExecute) revert InsufficientBalance();
+        if (hookAddress == address(0)) revert HookNotConfigured();
+        _getPoolKey();
         bool shouldSell;
         try this.checkShouldAllowSell() returns (bool allowed) {
             shouldSell = allowed;
         } catch {
             _tryRecordEndpointFailure(manager);
-            revert SellCheckFailed();
+            emit MonthlyExecutionFailed(SellCheckFailed.selector);
+            return;
         }
         if (!shouldSell) revert UnsafePrice();
 
@@ -96,21 +114,24 @@ contract Vault is Swap {
         uint256 minAmountOut;
         try this.quoteFundraisingTokenSwap(uint128(amountIn)) returns (uint256 quotedMinAmountOut) {
             minAmountOut = quotedMinAmountOut;
+            manager.recordQuoteSuccess();
         } catch {
             manager.recordQuoteFailure();
-            revert QuoteFailed();
+            emit MonthlyExecutionFailed(QuoteFailed.selector);
+            return;
         }
 
         uint256 amountOut;
         try this.swapFundraisingToken(uint128(amountIn), uint128(minAmountOut)) returns (uint256 swappedAmountOut) {
             amountOut = swappedAmountOut;
+            manager.recordSwapSuccess();
         } catch {
             manager.recordSwapFailure();
-            revert SwapFailed();
+            emit MonthlyExecutionFailed(SwapFailed.selector);
+            return;
         }
 
-        _distributeProceeds(amountOut);
-        lastSuccessAt = block.timestamp;
+        _finalizeSuccessfulExecution(amountOut);
     }
 
     function isDue() external view returns (bool) {
@@ -132,8 +153,7 @@ contract Vault is Swap {
      * Emits a {FundsTransferredToNonProfit} event indicating the owner and amount transferred.
      */
     function quoteFundraisingTokenSwap(uint128 amountIn) external onlySelf returns (uint256 minAmountOut) {
-        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(fundraisingToken);
-        bool isCurrency0FundraisingToken = Currency.unwrap(key.currency0) == address(fundraisingToken);
+        (PoolKey memory key, bool isCurrency0FundraisingToken) = _getPoolKey();
         minAmountOut = getMinAmountOut(key, isCurrency0FundraisingToken, amountIn, bytes(""));
     }
 
@@ -142,8 +162,7 @@ contract Vault is Swap {
         onlySelf
         returns (uint256 amountOut)
     {
-        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(fundraisingToken);
-        bool isCurrency0FundraisingToken = Currency.unwrap(key.currency0) == address(fundraisingToken);
+        (PoolKey memory key, bool isCurrency0FundraisingToken) = _getPoolKey();
         amountOut = swapExactInputSingle(key, amountIn, minAmountOut, isCurrency0FundraisingToken);
     }
 
@@ -158,8 +177,9 @@ contract Vault is Swap {
     }
 
     function shouldAllowSell() public view returns (bool) {
+        if (hookAddress == address(0)) revert HookNotConfigured();
         IHook hook = IHook(hookAddress);
-        PoolKey memory key = IFactory(factoryAddress).getPoolKeys(fundraisingToken);
+        (PoolKey memory key, bool fundraisingIsToken0) = _getPoolKey();
 
         uint32 interval = oracleObservationInterval;
 
@@ -175,22 +195,8 @@ contract Vault is Swap {
 
         int24 currentTick = hook.getCurrentTick(key);
 
-        bool fundraisingIsToken0 = Currency.unwrap(key.currency0) == address(fundraisingToken);
-
-        if (fundraisingIsToken0) {
-            // FundraisingToken DOWN too much → block
-            if (avgTick - currentTick > maxTickDeviation) {
-                return false;
-            }
-        } else {
-            // FundraisingToken DOWN too much → block
-            if (currentTick - avgTick > maxTickDeviation) {
-                return false;
-            }
-        }
-
-        // UP, SAME, or small dip → allowed
-        return true;
+        if (fundraisingIsToken0) return avgTick - currentTick <= maxTickDeviation;
+        return currentTick - avgTick <= maxTickDeviation;
     }
 
     function _distributeProceeds(uint256 amountOut) internal {
@@ -221,6 +227,22 @@ contract Vault is Swap {
     }
 
     function _tryRecordEndpointFailure(IEmergencyManager manager) internal {
-        try manager.recordEndpointFailure() {} catch {}
+        try manager.recordEndpointFailure(uint8(IIntegrationRegistry.Endpoint.STATE_VIEW)) {} catch {}
+    }
+
+    function _finalizeSuccessfulExecution(uint256 amountOut) internal {
+        _distributeProceeds(amountOut);
+        lastSuccessAt = block.timestamp;
+    }
+
+    function _getPoolKey() internal view returns (PoolKey memory key, bool isCurrency0FundraisingToken) {
+        key = IFactory(factoryAddress).getPoolKeys(fundraisingToken);
+        bool isCurrency0 = Currency.unwrap(key.currency0) == fundraisingToken;
+        bool isCurrency1 = Currency.unwrap(key.currency1) == fundraisingToken;
+        bool hasUnderlyingAsCurrency0 = Currency.unwrap(key.currency0) == underlyingAsset;
+        bool hasUnderlyingAsCurrency1 = Currency.unwrap(key.currency1) == underlyingAsset;
+        bool isExpectedPair = (isCurrency0 && hasUnderlyingAsCurrency1) || (isCurrency1 && hasUnderlyingAsCurrency0);
+        if (!isExpectedPair) revert PoolNotConfigured();
+        return (key, isCurrency0);
     }
 }

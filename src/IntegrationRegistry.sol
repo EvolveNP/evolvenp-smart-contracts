@@ -11,7 +11,8 @@ contract IntegrationRegistry is Ownable {
         QUOTER,
         POOL_MANAGER,
         POSITION_MANAGER,
-        STATE_VIEW
+        STATE_VIEW,
+        HOOK_DEPLOYER
     }
 
     error ZeroAddress();
@@ -25,6 +26,7 @@ contract IntegrationRegistry is Ownable {
     address public poolManager; // The address of the uniswap v4 pool manager
     address public positionManager; // The address of the uniswap v4 position manager
     address public stateView; // The address of the uniswap v4 state view
+    address public hookDeployer; // The address of the hook deployer contract
     address public emergencyManager; // The address of the emergency manager contract
 
     mapping(Endpoint => mapping(address => bool)) public isAllowedAddress; // Mapping to track allowed addresses for each integration type
@@ -44,6 +46,7 @@ contract IntegrationRegistry is Ownable {
         address _poolManager,
         address _positionManager,
         address _stateView,
+        address _hookDeployer,
         address _emergencyManager
     )
         Ownable(msg.sender)
@@ -53,6 +56,7 @@ contract IntegrationRegistry is Ownable {
         nonZeroAddress(_poolManager)
         nonZeroAddress(_positionManager)
         nonZeroAddress(_stateView)
+        nonZeroAddress(_hookDeployer)
         nonZeroAddress(_emergencyManager)
     {
         router = _router;
@@ -61,6 +65,7 @@ contract IntegrationRegistry is Ownable {
         poolManager = _poolManager;
         positionManager = _positionManager;
         stateView = _stateView;
+        hookDeployer = _hookDeployer;
         emergencyManager = _emergencyManager;
     }
 
@@ -90,6 +95,9 @@ contract IntegrationRegistry is Ownable {
         } else if (endpoint == Endpoint.STATE_VIEW) {
             currentAddress = stateView;
             stateView = newAddress;
+        } else if (endpoint == Endpoint.HOOK_DEPLOYER) {
+            currentAddress = hookDeployer;
+            hookDeployer = newAddress;
         }
 
         emit IntegrationUpdated(endpoint, currentAddress, newAddress);

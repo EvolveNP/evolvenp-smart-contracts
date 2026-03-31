@@ -5,10 +5,9 @@ import {FundraisingTokenHook} from "./FundraisingTokenHook.sol";
 import {IFactory} from "./interfaces/IFactory.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 
-contract HookDeployer is Ownable {
+contract HookDeployer {
     IFactory public factory;
     IIntegrationRegistry public integrationRegistry;
 
@@ -31,20 +30,16 @@ contract HookDeployer is Ownable {
     constructor(address _factoryAddress, address _integrationRegistryAddress)
         nonZeroAddress(_factoryAddress)
         nonZeroAddress(_integrationRegistryAddress)
-        Ownable(msg.sender)
     {
         factory = IFactory(_factoryAddress);
         integrationRegistry = IIntegrationRegistry(_integrationRegistryAddress);
     }
 
     function deployHook(address fundraisingToken, address vault, bytes32 salt) external onlyFactory returns (address) {
-        address router = integrationRegistry.router();
-        address quoter = integrationRegistry.quoter();
-        address stateView = integrationRegistry.stateView();
         address poolManager = integrationRegistry.poolManager();
 
         FundraisingTokenHook hook =
-            new FundraisingTokenHook{salt: salt}(poolManager, fundraisingToken, vault, router, quoter, stateView);
+            new FundraisingTokenHook{salt: salt}(poolManager, fundraisingToken, vault, address(integrationRegistry));
         return address(hook);
     }
 
@@ -58,29 +53,26 @@ contract HookDeployer is Ownable {
      *
      *      The function reverts if no fundraising protocol has been initialized for the given owner.
      *
-     * @param _nonProfitOrgOwner The address of the owner whose fundraising protocol configuration is used
+     * @param _fundraisingToken The address of the fundraising token for which to find a salt.
      *                           to build constructor arguments for salt mining.
      *
      * @return salt The computed CREATE2 salt that results in a hook address whose lower bits satisfy
      *              the required Uniswap V4 hook flag constraints.
      */
-    function findSalt(address _nonProfitOrgOwner) external view nonZeroAddress(_nonProfitOrgOwner) returns (bytes32) {
+    function findSalt(address _fundraisingToken) external view nonZeroAddress(_fundraisingToken) returns (bytes32) {
         uint160 flags = uint160(
             Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
                 | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
                 | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
 
-        IFactory.FundraisingProtocol memory protocol = factory.getProtocol(_nonProfitOrgOwner);
+        IFactory.FundraisingProtocol memory protocol = factory.getProtocol(_fundraisingToken);
 
         if (protocol.fundraisingToken == address(0)) revert ProtocolNotAvailable();
-        address router = integrationRegistry.router();
-        address quoter = integrationRegistry.quoter();
-        address stateView = integrationRegistry.stateView();
         address poolManager = integrationRegistry.poolManager();
         // Mine a salt that will produce a hook address with the correct flags
         bytes memory constructorArgs =
-            abi.encode(poolManager, protocol.fundraisingToken, protocol.vault, router, quoter, stateView);
+            abi.encode(poolManager, protocol.fundraisingToken, protocol.vault, address(integrationRegistry));
         (, bytes32 salt) =
             HookMiner.find(address(this), flags, type(FundraisingTokenHook).creationCode, constructorArgs);
         return salt;

@@ -8,6 +8,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import {Factory} from "../src/Factory.sol";
 import {IFactory} from "../src/interfaces/IFactory.sol";
+import {IIntegrationRegistry} from "../src/interfaces/IIntegrationRegistry.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
@@ -31,16 +32,13 @@ contract MockFactoryToken is ERC20 {
 contract MockFactoryEmergencyManager {
     address public lastReporter;
     bool public lastAllowed;
-    uint256 public endpointFailureCalls;
 
     function setReporter(address reporter, bool allowed) external {
         lastReporter = reporter;
         lastAllowed = allowed;
     }
 
-    function recordEndpointFailure() external {
-        ++endpointFailureCalls;
-    }
+    function recordEndpointFailure(uint8) external {}
 }
 
 contract MockFactoryHookDeployer {
@@ -69,8 +67,26 @@ contract MockFactoryPermit2 {
     address public lastSpender;
     uint160 public lastAmount;
     uint48 public lastExpiration;
+    bool public shouldRevert;
+    uint256 public revertOnCall;
+    uint256 public callCount;
+
+    function setShouldRevert(bool revert_) external {
+        shouldRevert = revert_;
+        revertOnCall = 0;
+        callCount = 0;
+    }
+
+    function setRevertOnCall(uint256 callNumber) external {
+        shouldRevert = false;
+        revertOnCall = callNumber;
+        callCount = 0;
+    }
 
     function approve(address token, address spender, uint160 amount, uint48 expiration) external {
+        ++callCount;
+        if (revertOnCall != 0 && callCount == revertOnCall) revert("permit2 failed");
+        if (shouldRevert) revert("permit2 failed");
         lastToken = token;
         lastSpender = spender;
         lastAmount = amount;
@@ -103,11 +119,13 @@ contract MockFactoryRegistry {
     address public poolManager;
     address public positionManager;
     address public stateView;
+    address public hookDeployer;
     address public emergencyManager;
 
-    constructor(address _permit2, address _positionManager) {
+    constructor(address _permit2, address _positionManager, address _hookDeployer) {
         permit2 = _permit2;
         positionManager = _positionManager;
+        hookDeployer = _hookDeployer;
     }
 
     function isAllowedCodehash(uint8, bytes32) external pure returns (bool) {
@@ -116,9 +134,7 @@ contract MockFactoryRegistry {
 }
 
 contract FactoryHarness is Factory {
-    constructor(address registry, address emergencyManager, address hookDeployer, address usdc)
-        Factory(registry, emergencyManager, hookDeployer, usdc)
-    {}
+    constructor(address registry, address emergencyManager, address usdc) Factory(registry, emergencyManager, usdc) {}
 
     function exposedGetModifyLiqiuidityParams(
         PoolKey memory key,
@@ -150,45 +166,33 @@ contract FactoryTest is Test {
         hookDeployer = new MockFactoryHookDeployer();
         permit2 = new MockFactoryPermit2();
         positionManager = new MockFactoryPositionManager();
-        registry = new MockFactoryRegistry(address(permit2), address(positionManager));
+        registry = new MockFactoryRegistry(address(permit2), address(positionManager), address(hookDeployer));
 
         vm.prank(protocolAdmin);
-        factory = new FactoryHarness(address(registry), address(emergencyManager), address(hookDeployer), address(usdc));
+        factory = new FactoryHarness(address(registry), address(emergencyManager), address(usdc));
     }
 
     function testConstructorRejectsZeroAddresses() public {
         vm.expectRevert(Factory.ZeroAddress.selector);
-        new FactoryHarness(address(0), address(emergencyManager), address(hookDeployer), address(usdc));
+        new FactoryHarness(address(0), address(emergencyManager), address(usdc));
     }
 
     function testCreateFundraisingVaultOnlyOwner() public {
         vm.prank(thirdParty);
         vm.expectRevert();
-        factory.createFundraisingVault(
-            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
-        );
+        factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
     }
 
     function testCreateFundraisingVaultRejectsInvalidInputs() public {
         vm.prank(protocolAdmin);
-        vm.expectRevert(Factory.ZeroAddress.selector);
-        factory.createFundraisingVault(
-            "Fund", "FUND", address(usdc), address(0), _beneficiaries(), 30 days, 5e17, 1e6, 1000
-        );
-
-        vm.prank(protocolAdmin);
         vm.expectRevert(Factory.UnsupportedUnderlyingAsset.selector);
-        factory.createFundraisingVault(
-            "Fund", "FUND", address(0x1234), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
-        );
+        factory.createFundraisingVault("Fund", "FUND", address(0x1234), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
     }
 
     function testCreateFundraisingVaultDeploysVaultAndToken() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
-        factory.createFundraisingVault(
-            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
-        );
+        factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
 
         (address fundraisingToken, address vault) = _decodeCreatedVault();
         assertTrue(fundraisingToken != address(0));
@@ -202,6 +206,7 @@ contract FactoryTest is Test {
         assertEq(protocol.vault, vault);
         assertEq(protocol.hook, address(0));
         assertFalse(protocol.isLPCreated);
+        assertEq(MockFactoryToken(fundraisingToken).balanceOf(address(factory)), 750 * 10 ** usdc.decimals());
     }
 
     function testCreatePoolRejectsInvalidInputs() public {
@@ -236,9 +241,7 @@ contract FactoryTest is Test {
     function testCreatePoolHappyPathStoresHookAndPoolKey() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
-        factory.createFundraisingVault(
-            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
-        );
+        factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
 
         (address fundraisingToken,) = _decodeCreatedVault();
         hookDeployer.configure(fakeHook, false);
@@ -247,7 +250,6 @@ contract FactoryTest is Test {
 
         vm.startPrank(protocolAdmin);
         usdc.approve(address(factory), type(uint256).max);
-        MockFactoryToken(fundraisingToken).approve(address(factory), type(uint256).max);
         factory.createPool(fundraisingToken, 100e6, 200e6, bytes32("salt"));
         vm.stopPrank();
 
@@ -255,6 +257,8 @@ contract FactoryTest is Test {
         assertTrue(protocol.isLPCreated);
         assertEq(protocol.hook, fakeHook);
         assertEq(hookDeployer.lastFundraisingToken(), fundraisingToken);
+        assertEq(hookDeployer.lastVault(), protocol.vault);
+        assertEq(hookDeployer.lastSalt(), bytes32("salt"));
 
         PoolKey memory poolKey = factory.getPoolKeys(fundraisingToken);
         address storedCurrency0 = Currency.unwrap(poolKey.currency0);
@@ -269,51 +273,135 @@ contract FactoryTest is Test {
         assertGt(firstMulticallParam.length, 0);
     }
 
+    function testCreatePoolRejectsWhenFactoryFundraisingTokenBalanceIsTooLow() public {
+        address tokenKey = address(new MockFactoryToken("Fund", "FUND", 6));
+        _storeProtocol(tokenKey, address(usdc), address(0xD00D), address(0), false);
+
+        usdc.mint(protocolAdmin, 100e6);
+
+        vm.startPrank(protocolAdmin);
+        usdc.approve(address(factory), type(uint256).max);
+        vm.expectRevert(Factory.InsufficientFundraisingTokenBalance.selector);
+        factory.createPool(tokenKey, 10e6, 20e6, bytes32("salt"));
+        vm.stopPrank();
+    }
+
     function testCreatePoolRevertsWhenHookDeploymentFails() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
-        factory.createFundraisingVault(
-            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
-        );
+        factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
         (address fundraisingToken,) = _decodeCreatedVault();
 
         hookDeployer.configure(address(0), true);
         usdc.mint(protocolAdmin, 100e6);
 
+        vm.expectCall(
+            address(emergencyManager),
+            abi.encodeCall(
+                MockFactoryEmergencyManager.recordEndpointFailure, (uint8(IIntegrationRegistry.Endpoint.HOOK_DEPLOYER))
+            )
+        );
+
         vm.startPrank(protocolAdmin);
         usdc.approve(address(factory), type(uint256).max);
-        MockFactoryToken(fundraisingToken).approve(address(factory), type(uint256).max);
-        vm.expectRevert(Factory.HookDeploymentFailed.selector);
         factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
         vm.stopPrank();
+
+        assertEq(usdc.balanceOf(address(factory)), 0);
+        IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
+        assertFalse(protocol.isLPCreated);
+        assertEq(protocol.hook, address(0));
+    }
+
+    function testCreatePoolRevertsWhenPermit2Fails() public {
+        vm.recordLogs();
+        vm.prank(protocolAdmin);
+        factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+        (address fundraisingToken,) = _decodeCreatedVault();
+
+        hookDeployer.configure(fakeHook, false);
+        permit2.setShouldRevert(true);
+        usdc.mint(protocolAdmin, 100e6);
+
+        vm.expectCall(
+            address(emergencyManager),
+            abi.encodeCall(
+                MockFactoryEmergencyManager.recordEndpointFailure, (uint8(IIntegrationRegistry.Endpoint.PERMIT2))
+            )
+        );
+
+        vm.startPrank(protocolAdmin);
+        usdc.approve(address(factory), type(uint256).max);
+        factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(protocolAdmin), 100e6);
+        assertEq(usdc.balanceOf(address(factory)), 0);
+        IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
+        assertFalse(protocol.isLPCreated);
+    }
+
+    function testCreatePoolRevertsWhenSecondPermit2ApprovalFails() public {
+        vm.recordLogs();
+        vm.prank(protocolAdmin);
+        factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+        (address fundraisingToken,) = _decodeCreatedVault();
+
+        hookDeployer.configure(fakeHook, false);
+        permit2.setRevertOnCall(2);
+        usdc.mint(protocolAdmin, 100e6);
+
+        vm.expectCall(
+            address(emergencyManager),
+            abi.encodeCall(
+                MockFactoryEmergencyManager.recordEndpointFailure, (uint8(IIntegrationRegistry.Endpoint.PERMIT2))
+            )
+        );
+
+        vm.startPrank(protocolAdmin);
+        usdc.approve(address(factory), type(uint256).max);
+        factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(protocolAdmin), 100e6);
+        assertEq(usdc.balanceOf(address(factory)), 0);
+        IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
+        assertFalse(protocol.isLPCreated);
     }
 
     function testCreatePoolRevertsWhenPositionManagerFails() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
-        factory.createFundraisingVault(
-            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
-        );
+        factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
         (address fundraisingToken,) = _decodeCreatedVault();
 
         hookDeployer.configure(fakeHook, false);
         positionManager.setShouldRevert(true);
         usdc.mint(protocolAdmin, 100e6);
 
+        vm.expectCall(
+            address(emergencyManager),
+            abi.encodeCall(
+                MockFactoryEmergencyManager.recordEndpointFailure,
+                (uint8(IIntegrationRegistry.Endpoint.POSITION_MANAGER))
+            )
+        );
+
         vm.startPrank(protocolAdmin);
         usdc.approve(address(factory), type(uint256).max);
-        MockFactoryToken(fundraisingToken).approve(address(factory), type(uint256).max);
-        vm.expectRevert(Factory.PositionManagerCallFailed.selector);
         factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
         vm.stopPrank();
+
+        assertEq(usdc.balanceOf(protocolAdmin), 100e6);
+        assertEq(usdc.balanceOf(address(factory)), 0);
+        IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
+        assertFalse(protocol.isLPCreated);
     }
 
     function testCreatePoolRevertsWhenAlreadyCreated() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
-        factory.createFundraisingVault(
-            "Fund", "FUND", address(usdc), thirdParty, _beneficiaries(), 30 days, 5e17, 1e6, 1000
-        );
+        factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
         (address fundraisingToken,) = _decodeCreatedVault();
 
         hookDeployer.configure(fakeHook, false);
@@ -321,11 +409,32 @@ contract FactoryTest is Test {
 
         vm.startPrank(protocolAdmin);
         usdc.approve(address(factory), type(uint256).max);
-        MockFactoryToken(fundraisingToken).approve(address(factory), type(uint256).max);
         factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
         vm.expectRevert(Factory.PoolAlreadyExists.selector);
         factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
         vm.stopPrank();
+    }
+
+    function testCreatePoolWorksAfterOwnershipTransfer() public {
+        vm.recordLogs();
+        vm.prank(protocolAdmin);
+        factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+        (address fundraisingToken,) = _decodeCreatedVault();
+
+        vm.prank(protocolAdmin);
+        factory.transferOwnership(thirdParty);
+
+        hookDeployer.configure(fakeHook, false);
+        usdc.mint(thirdParty, 100e6);
+
+        vm.startPrank(thirdParty);
+        usdc.approve(address(factory), type(uint256).max);
+        factory.createPool(fundraisingToken, 10e6, 20e6, bytes32("salt"));
+        vm.stopPrank();
+
+        IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
+        assertTrue(protocol.isLPCreated);
+        assertEq(protocol.hook, fakeHook);
     }
 
     function testSelfOnlyEntryPointsRejectExternalCall() public {

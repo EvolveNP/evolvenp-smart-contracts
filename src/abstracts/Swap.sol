@@ -71,21 +71,13 @@ abstract contract Swap {
 
         uint256 balanceBeforeSwap;
         uint256 balanceAfterSwap;
-        if (Currency.unwrap(currencyOut) == address(0)) {
-            balanceBeforeSwap = address(this).balance;
-        } else {
-            balanceBeforeSwap = currencyOut.balanceOf(address(this));
-        }
+        balanceBeforeSwap = _balanceOfCurrency(currencyOut);
 
         approveTokenWithPermit2(currencyInAddress, uint160(amountIn), uint48(deadline));
 
         (UniversalRouter(payable(integrationRegistry.router()))).execute(commands, inputs, deadline);
 
-        if (Currency.unwrap(currencyOut) == address(0)) {
-            balanceAfterSwap = address(this).balance;
-        } else {
-            balanceAfterSwap = currencyOut.balanceOf(address(this));
-        }
+        balanceAfterSwap = _balanceOfCurrency(currencyOut);
         amountOut = balanceAfterSwap - balanceBeforeSwap;
     }
 
@@ -104,6 +96,10 @@ abstract contract Swap {
 
         (uint256 amountOut,) = (IV4Quoter(integrationRegistry.quoter())).quoteExactInputSingle(params);
 
-        return (amountOut * slippage) / 1e18;
+        return (amountOut * (1e18 - slippage)) / 1e18;
+    }
+
+    function _balanceOfCurrency(Currency currency) internal view returns (uint256) {
+        return currency.balanceOf(address(this));
     }
 }

@@ -2,7 +2,6 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
-import {stdError} from "forge-std/StdError.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import {FundraisingTokenHook} from "../src/FundraisingTokenHook.sol";
@@ -18,6 +17,7 @@ import {BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta
 import {BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {IIntegrationRegistry} from "../src/interfaces/IIntegrationRegistry.sol";
 
 contract MockHookToken is ERC20 {
     constructor() ERC20("Fund", "FUND") {}
@@ -25,6 +25,10 @@ contract MockHookToken is ERC20 {
     function mint(address to, uint256 amount) external {
         _mint(to, amount);
     }
+}
+
+contract ZeroSupplyHookToken is ERC20 {
+    constructor() ERC20("Zero", "ZERO") {}
 }
 
 contract MockHookPoolManager {
@@ -57,6 +61,23 @@ contract MockHookStateView {
     }
 }
 
+contract MockHookRegistry {
+    address public router;
+    address public permit2;
+    address public quoter;
+    address public poolManager;
+    address public positionManager;
+    address public stateView;
+    address public hookDeployer;
+    address public emergencyManager;
+
+    constructor(address router_, address quoter_, address stateView_) {
+        router = router_;
+        quoter = quoter_;
+        stateView = stateView_;
+    }
+}
+
 contract MockMsgSender {
     address internal nextSender;
 
@@ -70,14 +91,9 @@ contract MockMsgSender {
 }
 
 contract FundraisingTokenHookHarness is FundraisingTokenHook {
-    constructor(
-        address poolManager,
-        address fundraisingToken,
-        address vault,
-        address router,
-        address quoter,
-        address stateView
-    ) FundraisingTokenHook(poolManager, fundraisingToken, vault, router, quoter, stateView) {}
+    constructor(address poolManager, address fundraisingToken, address vault, address registry)
+        FundraisingTokenHook(poolManager, fundraisingToken, vault, registry)
+    {}
 
     function validateHookAddress(BaseHook) internal pure override {}
 
@@ -138,6 +154,7 @@ contract FundraisingTokenHookTest is Test {
     MockHookStateView internal stateView;
     MockMsgSender internal router;
     MockMsgSender internal quoter;
+    MockHookRegistry internal registry;
     FundraisingTokenHookHarness internal hook;
 
     address internal vault = address(0xA11CE);
@@ -149,10 +166,9 @@ contract FundraisingTokenHookTest is Test {
         stateView = new MockHookStateView();
         router = new MockMsgSender();
         quoter = new MockMsgSender();
+        registry = new MockHookRegistry(address(router), address(quoter), address(stateView));
 
-        hook = new FundraisingTokenHookHarness(
-            address(poolManager), address(token), vault, address(router), address(quoter), address(stateView)
-        );
+        hook = new FundraisingTokenHookHarness(address(poolManager), address(token), vault, address(registry));
 
         token.mint(user, 1_000_000 ether);
         stateView.setState(0, 1_000_000);
@@ -267,9 +283,22 @@ contract FundraisingTokenHookTest is Test {
         vm.warp(block.timestamp + 2 hours);
 
         SwapParams memory params =
-            SwapParams({zeroForOne: true, amountSpecified: type(int256).max, sqrtPriceLimitX96: 0});
-        vm.expectRevert(stdError.arithmeticError);
+            SwapParams({zeroForOne: true, amountSpecified: int256(1 << 134), sqrtPriceLimitX96: 0});
+        vm.expectRevert(FundraisingTokenHook.FeeToLarge.selector);
         hook.exposedBeforeSwap(user, key, params, bytes(""));
+    }
+
+    function testAfterSwapHandlesMaxDeltaWithoutOverflow() public {
+        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        hook.exposedAfterInitialize(key, 0, 0);
+
+        vm.roll(block.number + 20);
+        vm.warp(block.timestamp + 2 hours);
+
+        SwapParams memory buying = SwapParams({zeroForOne: false, amountSpecified: -10 ether, sqrtPriceLimitX96: 0});
+        (, int128 fee) = hook.exposedAfterSwap(user, key, buying, toBalanceDelta(type(int128).max, 0), bytes(""));
+
+        assertEq(fee, int128(type(int128).max / 100));
     }
 
     function testAfterSwapNonBuyingAndZeroOutputBranches() public {
@@ -315,11 +344,11 @@ contract FundraisingTokenHookTest is Test {
         vm.warp(block.timestamp + 2 hours);
 
         SwapParams memory buying = SwapParams({zeroForOne: false, amountSpecified: -10 ether, sqrtPriceLimitX96: 0});
-        router.setMsgSender(address(0));
+        router.setMsgSender(vault);
 
-        (, int128 feeFromZeroSender) =
+        (, int128 feeFromVaultSender) =
             hook.exposedAfterSwap(address(router), key, buying, toBalanceDelta(100 ether, 0), bytes(""));
-        assertEq(feeFromZeroSender, 0);
+        assertEq(feeFromVaultSender, 0);
 
         token.mint(vault, 500_000 ether);
         router.setMsgSender(user);
@@ -331,7 +360,7 @@ contract FundraisingTokenHookTest is Test {
     function testTreasuryPercentTaxFlagAndMsgSenderBranches() public {
         assertEq(hook.exposedTreasuryBalancePercent(), 0);
         assertTrue(hook.exposedCheckIfTaxIncurred(user));
-        assertFalse(hook.exposedCheckIfTaxIncurred(address(0)));
+        assertFalse(hook.exposedCheckIfTaxIncurred(vault));
 
         router.setMsgSender(user);
         quoter.setMsgSender(vault);
@@ -341,6 +370,14 @@ contract FundraisingTokenHookTest is Test {
         vm.startPrank(address(0xDEAD), address(0xDEAD));
         assertEq(hook.exposedGetMsgSender(address(0x1234)), address(0xDEAD));
         vm.stopPrank();
+    }
+
+    function testTreasuryPercentReturnsZeroWhenTotalSupplyIsZero() public {
+        ZeroSupplyHookToken zeroSupplyToken = new ZeroSupplyHookToken();
+        FundraisingTokenHookHarness zeroSupplyHook =
+            new FundraisingTokenHookHarness(address(poolManager), address(zeroSupplyToken), vault, address(registry));
+
+        assertEq(zeroSupplyHook.exposedTreasuryBalancePercent(), 0);
     }
 
     function _poolKey(address currency0, address currency1) internal pure returns (PoolKey memory) {

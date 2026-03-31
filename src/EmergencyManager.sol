@@ -17,47 +17,29 @@ contract EmergencyManager is IEmergencyManager {
     struct Config {
         uint64 emergencyDuration;
         uint64 quoteFailureThreshold;
-        uint64 quoteFailureWindow;
-        uint64 quoteFailuresInWindowThreshold;
         uint64 swapFailureThreshold;
-        uint64 swapFailureWindow;
-        uint64 swapFailuresInWindowThreshold;
     }
 
     struct FailureCounters {
         uint64 consecutive;
-        uint64 inWindow;
-        uint64 windowStart;
     }
 
     address public immutable emergencyMultisig;
     address public immutable reporterRegistrar;
     uint256 public immutable emergencyDuration;
     uint256 public immutable quoteFailureThreshold;
-    uint256 public immutable quoteFailureWindow;
-    uint256 public immutable quoteFailuresInWindowThreshold;
     uint256 public immutable swapFailureThreshold;
-    uint256 public immutable swapFailureWindow;
-    uint256 public immutable swapFailuresInWindowThreshold;
 
     EmergencyState internal emergencyState;
     uint256 public emergencyExpiresAt;
     uint256 public armedReasonFlags;
-    uint64 public endpointFailureCount;
 
     FailureCounters public quoteFailures;
     FailureCounters public swapFailures;
 
     mapping(address => bool) public isReporter;
 
-    event EmergencyArmed(
-        uint256 triggerFlags,
-        uint64 endpointFailureCount,
-        uint64 consecutiveQuoteFailures,
-        uint64 quoteFailuresInWindow,
-        uint64 consecutiveSwapFailures,
-        uint64 swapFailuresInWindow
-    );
+    event EmergencyArmed(uint256 triggerFlags, uint64 consecutiveQuoteFailures, uint64 consecutiveSwapFailures);
     event EmergencyActivated(uint256 expiresAt);
     event EmergencyExited();
     event ReporterConfigured(address reporter, bool allowed);
@@ -98,11 +80,7 @@ contract EmergencyManager is IEmergencyManager {
         reporterRegistrar = _reporterRegistrar;
         emergencyDuration = config.emergencyDuration;
         quoteFailureThreshold = config.quoteFailureThreshold;
-        quoteFailureWindow = config.quoteFailureWindow;
-        quoteFailuresInWindowThreshold = config.quoteFailuresInWindowThreshold;
         swapFailureThreshold = config.swapFailureThreshold;
-        swapFailureWindow = config.swapFailureWindow;
-        swapFailuresInWindowThreshold = config.swapFailuresInWindowThreshold;
 
         emergencyState = EmergencyState.NORMAL;
         isReporter[_emergencyMultisig] = true;
@@ -148,45 +126,34 @@ contract EmergencyManager is IEmergencyManager {
     }
 
     function recordQuoteFailure() public override onlyReporter syncBefore {
-        _recordFailure(quoteFailures, quoteFailureWindow);
-        if (
-            (quoteFailureThreshold != 0 && quoteFailures.consecutive >= quoteFailureThreshold)
-                || (quoteFailuresInWindowThreshold != 0 && quoteFailures.inWindow >= quoteFailuresInWindowThreshold)
-        ) {
+        _recordFailure(quoteFailures);
+        if (quoteFailureThreshold != 0 && quoteFailures.consecutive >= quoteFailureThreshold) {
             _armEmergency(TRIGGER_QUOTE_FAILURE);
         }
     }
 
+    function recordQuoteSuccess() external onlyReporter syncBefore {
+        quoteFailures.consecutive = 0;
+    }
+
     function recordSwapFailure() public override onlyReporter syncBefore {
-        _recordFailure(swapFailures, swapFailureWindow);
-        if (
-            (swapFailureThreshold != 0 && swapFailures.consecutive >= swapFailureThreshold)
-                || (swapFailuresInWindowThreshold != 0 && swapFailures.inWindow >= swapFailuresInWindowThreshold)
-        ) {
+        _recordFailure(swapFailures);
+        if (swapFailureThreshold != 0 && swapFailures.consecutive >= swapFailureThreshold) {
             _armEmergency(TRIGGER_SWAP_FAILURE);
         }
     }
 
+    function recordSwapSuccess() external onlyReporter syncBefore {
+        swapFailures.consecutive = 0;
+    }
+
     function recordEndpointFailure() external override onlyReporter syncBefore {
-        unchecked {
-            ++endpointFailureCount;
-        }
         _armEmergency(TRIGGER_ENDPOINT_FAILURE);
     }
 
-    function _recordFailure(FailureCounters storage counters, uint256 window) internal {
+    function _recordFailure(FailureCounters storage counters) internal {
         unchecked {
             ++counters.consecutive;
-        }
-
-        if (window == 0 || counters.windowStart == 0 || block.timestamp > counters.windowStart + window) {
-            counters.windowStart = uint64(block.timestamp);
-            counters.inWindow = 1;
-            return;
-        }
-
-        unchecked {
-            ++counters.inWindow;
         }
     }
 
@@ -194,14 +161,7 @@ contract EmergencyManager is IEmergencyManager {
         armedReasonFlags |= triggerFlag;
         if (emergencyState == EmergencyState.NORMAL) {
             emergencyState = EmergencyState.ARMED;
-            emit EmergencyArmed(
-                armedReasonFlags,
-                endpointFailureCount,
-                quoteFailures.consecutive,
-                quoteFailures.inWindow,
-                swapFailures.consecutive,
-                swapFailures.inWindow
-            );
+            emit EmergencyArmed(armedReasonFlags, quoteFailures.consecutive, swapFailures.consecutive);
         }
     }
 
@@ -216,13 +176,8 @@ contract EmergencyManager is IEmergencyManager {
         emergencyState = EmergencyState.NORMAL;
         emergencyExpiresAt = 0;
         armedReasonFlags = 0;
-        endpointFailureCount = 0;
         quoteFailures.consecutive = 0;
-        quoteFailures.inWindow = 0;
-        quoteFailures.windowStart = 0;
         swapFailures.consecutive = 0;
-        swapFailures.inWindow = 0;
-        swapFailures.windowStart = 0;
     }
 
     function _resolvedMode() internal view returns (EmergencyState) {

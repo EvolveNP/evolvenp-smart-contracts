@@ -26,5 +26,9 @@ interface IEmergencyManager {
 
     function recordQuoteFailure() external;
 
+    function recordQuoteSuccess() external;
+
     function recordSwapFailure() external;
+
+    function recordSwapSuccess() external;
 }

@@ -96,6 +96,7 @@ contract Vault is Swap {
         uint256 minAmountOut;
         try this.quoteFundraisingTokenSwap(uint128(amountIn)) returns (uint256 quotedMinAmountOut) {
             minAmountOut = quotedMinAmountOut;
+            manager.recordQuoteSuccess();
         } catch {
             manager.recordQuoteFailure();
             revert QuoteFailed();
@@ -104,6 +105,7 @@ contract Vault is Swap {
         uint256 amountOut;
         try this.swapFundraisingToken(uint128(amountIn), uint128(minAmountOut)) returns (uint256 swappedAmountOut) {
             amountOut = swappedAmountOut;
+            manager.recordSwapSuccess();
         } catch {
             manager.recordSwapFailure();
             revert SwapFailed();

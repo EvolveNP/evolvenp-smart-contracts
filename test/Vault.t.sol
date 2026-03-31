@@ -30,8 +30,9 @@ contract MockERC20Token is ERC20 {
 contract MockVaultEmergencyManager {
     bool internal emergencyActive;
     uint256 public quoteFailureCount;
+    uint256 public quoteSuccessCount;
     uint256 public swapFailureCount;
-    uint256 public endpointFailureCount;
+    uint256 public swapSuccessCount;
 
     function setEmergencyActive(bool active) external {
         emergencyActive = active;
@@ -45,12 +46,19 @@ contract MockVaultEmergencyManager {
         ++quoteFailureCount;
     }
 
+    function recordQuoteSuccess() external {
+        ++quoteSuccessCount;
+    }
+
     function recordSwapFailure() external {
         ++swapFailureCount;
     }
 
+    function recordSwapSuccess() external {
+        ++swapSuccessCount;
+    }
+
     function recordEndpointFailure() external {
-        ++endpointFailureCount;
     }
 }
 
@@ -251,6 +259,22 @@ contract VaultTest is Test {
 
         vm.expectRevert(Vault.QuoteFailed.selector);
         vault.executeMonthlyEvent();
+    }
+
+    function testExecuteMonthlyEventRecordsQuoteAndSwapSuccess() public {
+        vm.warp(block.timestamp + 1 days);
+        fundraisingToken.mint(address(vault), 200);
+        hook.configure(0, 0, 0, false);
+        quoter.setQuote(95, false);
+        router.setSwapResult(address(usdc), 95, false);
+        usdc.mint(address(router), 95);
+
+        vault.executeMonthlyEvent();
+
+        assertEq(emergencyManager.quoteSuccessCount(), 1);
+        assertEq(emergencyManager.swapSuccessCount(), 1);
+        assertEq(emergencyManager.quoteFailureCount(), 0);
+        assertEq(emergencyManager.swapFailureCount(), 0);
     }
 
     function testExecuteMonthlyEventRecordsSwapFailure() public {

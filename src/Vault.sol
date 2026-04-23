@@ -89,6 +89,7 @@ contract Vault is Swap {
         emergencyManager = _emergencyManager;
         minTokenBalanceToExecute = _minTokenBalanceToExecute;
         factoryAddress = _factoryAddress;
+        lastSuccessAt = block.timestamp;
     }
 
     function executeMonthlyEvent() external {

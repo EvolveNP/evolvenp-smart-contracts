@@ -211,6 +211,9 @@ contract Factory is IFactory, Ownable {
             revert InsufficientFundraisingTokenBalance();
         }
 
+        IERC20Metadata(_protocol.underlyingAddress).safeTransferFrom(msg.sender, address(this), _amount0);
+
+
         if (_currency0 > _currency1) {
             (_currency0, _currency1) = (_currency1, _currency0);
             (amount0, amount1) = (amount1, amount0);
@@ -239,10 +242,7 @@ contract Factory is IFactory, Ownable {
             return;
         }
 
-        IERC20Metadata(_protocol.underlyingAddress).safeTransferFrom(msg.sender, address(this), _amount0);
-
-        // transfer assets to this contract;
-
+    
         PoolKey memory pool = PoolKey({
             currency0: currency0,
             currency1: currency1,
@@ -250,6 +250,9 @@ contract Factory is IFactory, Ownable {
             tickSpacing: TickMath.MAX_TICK_SPACING,
             hooks: IHooks(hook)
         });
+
+        // set hook address in vault
+        Vault(_protocol.vault).setHookAddress(hook);
 
         params[0] = abi.encodeWithSelector(IPoolInitializer_v4.initializePool.selector, pool, _startingPrice);
         params[1] = getModifyLiqiuidityParams(pool, amount0, amount1, _startingPrice);

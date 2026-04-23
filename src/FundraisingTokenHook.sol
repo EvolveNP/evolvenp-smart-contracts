@@ -17,6 +17,7 @@ import {IStateView} from "v4-periphery/src/interfaces/IStateView.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {TruncatedOracle} from "@uniswap/v4-periphery-trunc/libraries/TruncatedOracle.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
+import {IFactory} from "./interfaces/IFactory.sol";
 
 /**
  * @title FundraisingTokenHook
@@ -37,6 +38,7 @@ contract FundraisingTokenHook is BaseHook {
     error AmountGreaterThanMaxBuyAmount();
     error CoolDownPeriodNotPassed();
     error FeeToLarge();
+    error InvalidPool();
 
     /// @notice Oracle pools do not have fees because they exist to serve as an oracle for a pair of tokens
     error OnlyOneOraclePoolAllowed();
@@ -47,18 +49,18 @@ contract FundraisingTokenHook is BaseHook {
     /// @notice Oracle pools must have liquidity locked so that they cannot become more susceptible to price manipulation
     error OraclePoolMustLockLiquidity();
 
-    uint256 internal launchTimestamp; // The timestamp when the token was launched
     uint256 internal constant perWalletCoolDownPeriod = 1 minutes;
     uint256 internal constant maxBuySize = 333e13; // 0.333% of total supply (scaled by 1e18)
     uint256 internal constant blocksToHold = 10; // Number of blocks after launch during which transfers are restricted
     uint256 internal constant timeToHold = 1 hours; // Number of seconds after launch during which special hold rules apply
-    uint256 internal launchBlock; // Block number when the fundraising token was launched
 
-    address public immutable fundraisingTokenAddress; // The address of the fundraising token
-    address public immutable vault; // The address of the treasury wallet address
+    address public immutable factoryAddress; // The factory used to resolve fundraising token protocol context
+    address public immutable usdcAddress; // The shared underlying asset for fundraising pools
     IIntegrationRegistry public immutable integrationRegistry; // current integration endpoints source
     uint256 public constant maximumThreshold = 30e16; // The maximum threshold for the liquidity pool 30% = 30e16
-    mapping(address => uint256) public lastBuyTimestamp; // The last buy timestamp for each address
+    mapping(address => uint256) public launchTimestampByToken; // fundraising token => launch timestamp
+    mapping(address => uint256) public launchBlockByToken; // fundraising token => launch block
+    mapping(address => mapping(address => uint256)) public lastBuyTimestamp; // fundraising token => account => timestamp
 
     // 2% expressed with 18-decimal denominator
     uint256 public constant TAX_FEE_PERCENTAGE = 1e16; // 0.01 * 1e18 = 1e16 (1%)
@@ -90,16 +92,14 @@ contract FundraisingTokenHook is BaseHook {
      * used to enforce launch protection (e.g., cooldowns, max buy limits, and block-based restrictions).
      *
      * @param _poolManager The address of the Uniswap V4 PoolManager contract.
-     * @param _fundraisingTokenAddress The address of the fundraising token governed by this hook.
-     * @param _vault The address of the treasury wallet that receives swap fees (immutable).
+     * @param _factoryAddress The address of the factory that stores protocol->vault relationships.
+     * @param _usdcAddress The address of the shared USDC underlying token.
      */
-    constructor(address _poolManager, address _fundraisingTokenAddress, address _vault, address _integrationRegistry)
+    constructor(address _poolManager, address _factoryAddress, address _usdcAddress, address _integrationRegistry)
         BaseHook(IPoolManager(_poolManager))
     {
-        fundraisingTokenAddress = _fundraisingTokenAddress;
-        launchTimestamp = block.timestamp;
-        launchBlock = block.number;
-        vault = _vault;
+        factoryAddress = _factoryAddress;
+        usdcAddress = _usdcAddress;
         integrationRegistry = IIntegrationRegistry(_integrationRegistry);
     }
 
@@ -177,6 +177,9 @@ contract FundraisingTokenHook is BaseHook {
         returns (bytes4)
     {
         bytes32 id = PoolId.unwrap(key.toId());
+        (address fundraisingTokenAddress,) = _getFundraisingContext(key);
+        launchTimestampByToken[fundraisingTokenAddress] = block.timestamp;
+        launchBlockByToken[fundraisingTokenAddress] = block.number;
         (states[id].cardinality, states[id].cardinalityNext) = observations[id].initialize(_blockTimestamp(), tick);
         return BaseHook.afterInitialize.selector;
     }
@@ -239,13 +242,14 @@ contract FundraisingTokenHook is BaseHook {
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         address caller = getMsgSender(sender);
+        (address fundraisingTokenAddress, address vault) = _getFundraisingContext(key);
 
         bool isFundraisingTokenCurrency0 = Currency.unwrap(key.currency0) == fundraisingTokenAddress;
         bool isSelling =
             (isFundraisingTokenCurrency0 && params.zeroForOne) || (!isFundraisingTokenCurrency0 && !params.zeroForOne);
 
         uint256 feeAmount;
-        bool isTaxCutEnabled = checkIfTaxIncurred(caller);
+        bool isTaxCutEnabled = checkIfTaxIncurred(key, caller);
         if (isSelling && isTaxCutEnabled) {
             uint256 swapAmount =
                 params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
@@ -303,6 +307,7 @@ contract FundraisingTokenHook is BaseHook {
     ) internal override returns (bytes4, int128) {
         address caller = getMsgSender(sender);
         address currency0 = Currency.unwrap(key.currency0);
+        (address fundraisingTokenAddress, address vault) = _getFundraisingContext(key);
 
         bool isFundraisingTokenIsCurrencyZero = currency0 == fundraisingTokenAddress;
 
@@ -311,17 +316,17 @@ contract FundraisingTokenHook is BaseHook {
             || (!isFundraisingTokenIsCurrencyZero && params.zeroForOne);
 
         uint256 feeAmount;
-        bool isTaxCutEnabled = checkIfTaxIncurred(caller);
+        bool isTaxCutEnabled = checkIfTaxIncurred(key, caller);
         if (isBuying) {
             int256 _amountOut = params.zeroForOne ? delta.amount1() : delta.amount0();
             if (_amountOut <= 0) {
                 return (BaseHook.afterSwap.selector, 0);
             }
             // use provided sender (not tx.origin)
-            isTransferBlocked(caller, _amountOut);
+            isTransferBlocked(fundraisingTokenAddress, caller, _amountOut);
 
-            if (block.timestamp < launchTimestamp + timeToHold) {
-                lastBuyTimestamp[caller] = block.timestamp;
+            if (block.timestamp < launchTimestampByToken[fundraisingTokenAddress] + timeToHold) {
+                lastBuyTimestamp[fundraisingTokenAddress][caller] = block.timestamp;
             }
 
             if (isTaxCutEnabled) {
@@ -349,15 +354,15 @@ contract FundraisingTokenHook is BaseHook {
      * @custom:reverts AmountGreaterThanMaxBuyAmount If `_amount` exceeds the allowed max buy size during the hold period.
      * @custom:reverts CoolDownPeriodNotPassed If the wallet tries to transfer again before its cooldown period has elapsed.
      */
-    function isTransferBlocked(address _account, int256 _amount) internal view {
+    function isTransferBlocked(address fundraisingTokenAddress, address _account, int256 _amount) internal view {
         // Block transfers during launch protection (by block count)
-        if (block.number < launchBlock + blocksToHold) {
+        if (block.number < launchBlockByToken[fundraisingTokenAddress] + blocksToHold) {
             revert BlockToHoldNotPassed();
         }
 
-        if (block.timestamp < launchTimestamp + timeToHold) {
+        if (block.timestamp < launchTimestampByToken[fundraisingTokenAddress] + timeToHold) {
             // Block transfers if within time to hold after launch
-            uint256 lastBuy = lastBuyTimestamp[_account];
+            uint256 lastBuy = lastBuyTimestamp[fundraisingTokenAddress][_account];
 
             // maxBuySize is stored scaled by 1e18, so multiply by totalSupply and divide by 1e18
             uint256 _maxBuySize = (IERC20(fundraisingTokenAddress).totalSupply() * maxBuySize) / 1e18;
@@ -378,7 +383,8 @@ contract FundraisingTokenHook is BaseHook {
      *
      * @return percentage The treasury’s balance as a percentage of the total token supply, scaled by 1e18.
      */
-    function getTreasuryBalanceInPerecent() internal view returns (uint256) {
+    function getTreasuryBalanceInPerecent(PoolKey calldata key) internal view returns (uint256) {
+        (address fundraisingTokenAddress, address vault) = _getFundraisingContext(key);
         uint256 treasuryBalance = IERC20(fundraisingTokenAddress).balanceOf(vault);
         uint256 totalSupply = IERC20(fundraisingTokenAddress).totalSupply();
         if (totalSupply == 0) return 0;
@@ -395,8 +401,9 @@ contract FundraisingTokenHook is BaseHook {
      * @param sender The address initiating the transaction.
      * @return bool Returns `true` if tax should be incurred, otherwise `false`.
      */
-    function checkIfTaxIncurred(address sender) internal view returns (bool) {
-        return (getTreasuryBalanceInPerecent() < maximumThreshold) && sender != vault;
+    function checkIfTaxIncurred(PoolKey calldata key, address sender) internal view returns (bool) {
+        (, address vault) = _getFundraisingContext(key);
+        return (getTreasuryBalanceInPerecent(key) < maximumThreshold) && sender != vault;
     }
 
     function getMsgSender(address sender) internal view returns (address) {
@@ -439,5 +446,27 @@ contract FundraisingTokenHook is BaseHook {
 
     function stateView() public view returns (address) {
         return integrationRegistry.stateView();
+    }
+
+    function _getFundraisingContext(PoolKey calldata key)
+        internal
+        view
+        returns (address fundraisingTokenAddress, address vault)
+    {
+        address currency0 = Currency.unwrap(key.currency0);
+        address currency1 = Currency.unwrap(key.currency1);
+
+        if (currency0 == usdcAddress && currency1 != address(0)) {
+            fundraisingTokenAddress = currency1;
+        } else if (currency1 == usdcAddress && currency0 != address(0)) {
+            fundraisingTokenAddress = currency0;
+        } else {
+            revert InvalidPool();
+        }
+
+        IFactory.FundraisingProtocol memory protocol = IFactory(factoryAddress).getProtocol(fundraisingTokenAddress);
+        if (protocol.fundraisingToken != fundraisingTokenAddress || protocol.vault == address(0)) revert InvalidPool();
+
+        vault = protocol.vault;
     }
 }

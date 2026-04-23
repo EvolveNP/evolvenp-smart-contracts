@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
+import {IHookDeployer} from "./interfaces/IHookDeployer.sol";
 
 contract IntegrationRegistry is Ownable {
     enum Endpoint {
@@ -19,6 +20,8 @@ contract IntegrationRegistry is Ownable {
     error EmergencyIsNotActive();
     error NotAllowedAtAddress();
     error NoCodeAtAddress();
+    error HookAlreadyDeployed();
+    error HookDeploymentFailed();
 
     address public router; // The address of the uniswap universal router
     address public permit2; // The address of the uniswap permit2 contract
@@ -27,12 +30,14 @@ contract IntegrationRegistry is Ownable {
     address public positionManager; // The address of the uniswap v4 position manager
     address public stateView; // The address of the uniswap v4 state view
     address public hookDeployer; // The address of the hook deployer contract
+    address public hookAddress; // The address of the shared fundraising hook
     address public emergencyManager; // The address of the emergency manager contract
 
     mapping(Endpoint => mapping(address => bool)) public isAllowedAddress; // Mapping to track allowed addresses for each integration type
 
     event AllowListConfigured(Endpoint endpointType, address allowedAddress, bool allowed);
     event IntegrationUpdated(Endpoint endpointType, address oldAddress, address newAddress);
+    event HookDeployed(address hookAddress);
 
     modifier nonZeroAddress(address _address) {
         if (_address == address(0)) revert ZeroAddress();
@@ -107,5 +112,16 @@ contract IntegrationRegistry is Ownable {
         if (newAddress.code.length == 0) revert NoCodeAtAddress();
         isAllowedAddress[endpoint][newAddress] = allowed;
         emit AllowListConfigured(endpoint, newAddress, allowed);
+    }
+
+    function deployHook(bytes32 salt) external onlyOwner returns (address deployedHook) {
+        if (hookAddress != address(0)) revert HookAlreadyDeployed();
+        try IHookDeployer(hookDeployer).deployHook(salt) returns (address hook) {
+            hookAddress = hook;
+            emit HookDeployed(hook);
+            return hook;
+        } catch {
+            revert HookDeploymentFailed();
+        }
     }
 }

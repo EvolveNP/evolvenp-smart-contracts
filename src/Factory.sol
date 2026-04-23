@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {IFactory} from "./interfaces/IFactory.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {IHookDeployer} from "./interfaces/IHookDeployer.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {FundraisingToken} from "./FundraisingToken.sol";
@@ -29,9 +28,9 @@ contract Factory is IFactory, Ownable {
     error PoolAlreadyExists();
     error UnsupportedUnderlyingAsset();
     error OnlySelf();
-    error HookDeploymentFailed();
     error PositionManagerCallFailed();
     error InsufficientFundraisingTokenBalance();
+    error HookNotConfigured();
 
     address public immutable registryAddress;
     address public immutable emergencyManagerAddress;
@@ -165,33 +164,30 @@ contract Factory is IFactory, Ownable {
      * @param _fundraisingToken The fundraising token address used as the protocol key.
      * @param _amount0 The liquidity amount for token0 (can be native ETH if `address(0)` is underlying).
      * @param _amount1 The liquidity amount for token1 (fundraising token).
-     * @param _salt The deterministic CREATE2 salt for deploying the FundraisingTokenHook,
-     *             typically obtained from a `findSalt` helper function.
-     *
      * @custom:security Caller must ensure:
      *                  - ERC20 approvals are granted to this contract for both tokens.
      *                  - Sufficient balances are available.
-     *                  - The salt is pre-mined for a valid hook deployment address
-     *                    compatible with Uniswap V4 hook flag requirements.
+     *                  - A valid shared hook has already been deployed and registered in IntegrationRegistry.
      *
      * @custom:effects
      *      - Transfers liquidity assets into the contract.
-     *      - Deploys hook using CREATE2 for deterministic pool addressing.
      *      - Initializes the pool and mints initial liquidity.
      *      - Marks protocol as LP-created and stores hook and pool metadata.
      *
      * @custom:event Emits {LiquidityPoolCreated} with underlying token, fundraising token, and owner.
      */
 
-    function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1, bytes32 _salt)
+    function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1)
         external
         nonZeroAddress(_fundraisingToken)
         nonZeroAmount(_amount0)
         nonZeroAmount(_amount1)
         onlyOwner
     {
-        address positionManager = IIntegrationRegistry(registryAddress).positionManager();
-        address permit2 = IIntegrationRegistry(registryAddress).permit2();
+        IIntegrationRegistry registry = IIntegrationRegistry(registryAddress);
+        address positionManager = registry.positionManager();
+        address permit2 = registry.permit2();
+        address hookAddress = registry.hookAddress();
 
         bytes[] memory params = new bytes[](2);
 
@@ -201,6 +197,7 @@ contract Factory is IFactory, Ownable {
         }
         if (_protocol.isLPCreated) revert PoolAlreadyExists();
         if (_protocol.underlyingAddress != usdcAddress) revert UnsupportedUnderlyingAsset();
+        if (hookAddress == address(0)) revert HookNotConfigured();
 
         address _currency0 = _protocol.underlyingAddress;
         address _currency1 = _protocol.fundraisingToken;
@@ -210,6 +207,8 @@ contract Factory is IFactory, Ownable {
         if (IERC20Metadata(_currency1).balanceOf(address(this)) < amount1) {
             revert InsufficientFundraisingTokenBalance();
         }
+
+        IERC20Metadata(_protocol.underlyingAddress).safeTransferFrom(msg.sender, address(this), _amount0);
 
         if (_currency0 > _currency1) {
             (_currency0, _currency1) = (_currency1, _currency0);
@@ -222,34 +221,16 @@ contract Factory is IFactory, Ownable {
         Currency currency0 = Currency.wrap(_currency0);
         Currency currency1 = Currency.wrap(_currency1);
 
-        // deploy hook
-        address hook;
-        try this.deployHookFromFactory(_protocol.fundraisingToken, _protocol.vault, _salt) returns (
-            address deployedHook
-        ) {
-            hook = deployedHook;
-        } catch {
-            _handlePoolCreationFailure(
-                _protocol.fundraisingToken,
-                _protocol.underlyingAddress,
-                0,
-                HookDeploymentFailed.selector,
-                IIntegrationRegistry.Endpoint.HOOK_DEPLOYER
-            );
-            return;
-        }
-
-        IERC20Metadata(_protocol.underlyingAddress).safeTransferFrom(msg.sender, address(this), _amount0);
-
-        // transfer assets to this contract;
-
         PoolKey memory pool = PoolKey({
             currency0: currency0,
             currency1: currency1,
             fee: 0,
             tickSpacing: TickMath.MAX_TICK_SPACING,
-            hooks: IHooks(hook)
+            hooks: IHooks(hookAddress)
         });
+
+        // set hook address in vault
+        Vault(_protocol.vault).setHookAddress(hookAddress);
 
         params[0] = abi.encodeWithSelector(IPoolInitializer_v4.initializePool.selector, pool, _startingPrice);
         params[1] = getModifyLiqiuidityParams(pool, amount0, amount1, _startingPrice);
@@ -294,7 +275,7 @@ contract Factory is IFactory, Ownable {
         }
 
         _protocol.isLPCreated = true;
-        _protocol.hook = hook;
+        _protocol.hook = hookAddress;
         poolKeys[_protocol.fundraisingToken] = pool;
 
         emit LiquidityPoolCreated(_protocol.underlyingAddress, _protocol.fundraisingToken, _fundraisingToken);
@@ -347,15 +328,6 @@ contract Factory is IFactory, Ownable {
 
         return
             abi.encodeWithSelector(IPositionManager.modifyLiquidities.selector, abi.encode(actions, params), deadline);
-    }
-
-    function deployHookFromFactory(address fundraisingToken, address vault, bytes32 salt)
-        external
-        onlySelf
-        returns (address hook)
-    {
-        hook = IHookDeployer(IIntegrationRegistry(registryAddress).hookDeployer())
-            .deployHook(fundraisingToken, vault, salt);
     }
 
     function positionManagerMulticall(address positionManager, bytes[] calldata params) external onlySelf {

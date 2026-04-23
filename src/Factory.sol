@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {IFactory} from "./interfaces/IFactory.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {IHookDeployer} from "./interfaces/IHookDeployer.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {FundraisingToken} from "./FundraisingToken.sol";
@@ -29,7 +28,6 @@ contract Factory is IFactory, Ownable {
     error PoolAlreadyExists();
     error UnsupportedUnderlyingAsset();
     error OnlySelf();
-    error HookDeploymentFailed();
     error PositionManagerCallFailed();
     error InsufficientFundraisingTokenBalance();
 
@@ -165,29 +163,27 @@ contract Factory is IFactory, Ownable {
      * @param _fundraisingToken The fundraising token address used as the protocol key.
      * @param _amount0 The liquidity amount for token0 (can be native ETH if `address(0)` is underlying).
      * @param _amount1 The liquidity amount for token1 (fundraising token).
-     * @param _salt The deterministic CREATE2 salt for deploying the FundraisingTokenHook,
-     *             typically obtained from a `findSalt` helper function.
+     * @param _hookAddress The shared hook address that will be attached to the created pool.
      *
      * @custom:security Caller must ensure:
      *                  - ERC20 approvals are granted to this contract for both tokens.
      *                  - Sufficient balances are available.
-     *                  - The salt is pre-mined for a valid hook deployment address
-     *                    compatible with Uniswap V4 hook flag requirements.
+     *                  - The provided hook address is a valid deployed hook compatible with Uniswap V4.
      *
      * @custom:effects
      *      - Transfers liquidity assets into the contract.
-     *      - Deploys hook using CREATE2 for deterministic pool addressing.
      *      - Initializes the pool and mints initial liquidity.
      *      - Marks protocol as LP-created and stores hook and pool metadata.
      *
      * @custom:event Emits {LiquidityPoolCreated} with underlying token, fundraising token, and owner.
      */
 
-    function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1, bytes32 _salt)
+    function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1, address _hookAddress)
         external
         nonZeroAddress(_fundraisingToken)
         nonZeroAmount(_amount0)
         nonZeroAmount(_amount1)
+        nonZeroAddress(_hookAddress)
         onlyOwner
     {
         address positionManager = IIntegrationRegistry(registryAddress).positionManager();
@@ -225,34 +221,16 @@ contract Factory is IFactory, Ownable {
         Currency currency0 = Currency.wrap(_currency0);
         Currency currency1 = Currency.wrap(_currency1);
 
-        // deploy hook
-        address hook;
-        try this.deployHookFromFactory(_protocol.fundraisingToken, _protocol.vault, _salt) returns (
-            address deployedHook
-        ) {
-            hook = deployedHook;
-        } catch {
-            _handlePoolCreationFailure(
-                _protocol.fundraisingToken,
-                _protocol.underlyingAddress,
-                0,
-                HookDeploymentFailed.selector,
-                IIntegrationRegistry.Endpoint.HOOK_DEPLOYER
-            );
-            return;
-        }
-
-    
         PoolKey memory pool = PoolKey({
             currency0: currency0,
             currency1: currency1,
             fee: 0,
             tickSpacing: TickMath.MAX_TICK_SPACING,
-            hooks: IHooks(hook)
+            hooks: IHooks(_hookAddress)
         });
 
         // set hook address in vault
-        Vault(_protocol.vault).setHookAddress(hook);
+        Vault(_protocol.vault).setHookAddress(_hookAddress);
 
         params[0] = abi.encodeWithSelector(IPoolInitializer_v4.initializePool.selector, pool, _startingPrice);
         params[1] = getModifyLiqiuidityParams(pool, amount0, amount1, _startingPrice);
@@ -297,7 +275,7 @@ contract Factory is IFactory, Ownable {
         }
 
         _protocol.isLPCreated = true;
-        _protocol.hook = hook;
+        _protocol.hook = _hookAddress;
         poolKeys[_protocol.fundraisingToken] = pool;
 
         emit LiquidityPoolCreated(_protocol.underlyingAddress, _protocol.fundraisingToken, _fundraisingToken);
@@ -350,15 +328,6 @@ contract Factory is IFactory, Ownable {
 
         return
             abi.encodeWithSelector(IPositionManager.modifyLiquidities.selector, abi.encode(actions, params), deadline);
-    }
-
-    function deployHookFromFactory(address fundraisingToken, address vault, bytes32 salt)
-        external
-        onlySelf
-        returns (address hook)
-    {
-        hook = IHookDeployer(IIntegrationRegistry(registryAddress).hookDeployer())
-            .deployHook(fundraisingToken, vault, salt);
     }
 
     function positionManagerMulticall(address positionManager, bytes[] calldata params) external onlySelf {

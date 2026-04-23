@@ -258,6 +258,7 @@ contract VaultTest is Test {
         vm.warp(block.timestamp + 1 days);
         fundraisingToken.mint(address(vault), 100);
         hook.configure(0, 0, 0, true);
+        uint256 previousSuccessAt = vault.lastSuccessAt();
 
         vm.expectCall(
             address(emergencyManager),
@@ -268,7 +269,8 @@ contract VaultTest is Test {
 
         vault.executeMonthlyEvent();
 
-        assertEq(vault.lastSuccessAt(), 0);
+        assertEq(vault.lastSuccessAt(), previousSuccessAt);
+        assertEq(emergencyManager.lastEndpointFailure(), uint8(IIntegrationRegistry.Endpoint.STATE_VIEW));
     }
 
     function testExecuteMonthlyEventRevertsWhenPriceIsUnsafe() public {
@@ -285,11 +287,12 @@ contract VaultTest is Test {
         fundraisingToken.mint(address(vault), 200);
         hook.configure(0, 0, 0, false);
         quoter.setQuote(0, true);
+        uint256 previousSuccessAt = vault.lastSuccessAt();
 
         vault.executeMonthlyEvent();
 
         assertEq(emergencyManager.quoteFailureCount(), 1);
-        assertEq(vault.lastSuccessAt(), 0);
+        assertEq(vault.lastSuccessAt(), previousSuccessAt);
     }
 
     function testExecuteMonthlyEventRecordsQuoteAndSwapSuccess() public {
@@ -314,11 +317,12 @@ contract VaultTest is Test {
         hook.configure(0, 0, 0, false);
         quoter.setQuote(150, false);
         router.setSwapResult(address(usdc), 0, true);
+        uint256 previousSuccessAt = vault.lastSuccessAt();
 
         vault.executeMonthlyEvent();
 
         assertEq(emergencyManager.swapFailureCount(), 1);
-        assertEq(vault.lastSuccessAt(), 0);
+        assertEq(vault.lastSuccessAt(), previousSuccessAt);
     }
 
     function testConstructorRejectsInvalidConfig() public {

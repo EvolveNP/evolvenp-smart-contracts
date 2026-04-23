@@ -17,7 +17,7 @@ import {BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta
 import {BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {IIntegrationRegistry} from "../src/interfaces/IIntegrationRegistry.sol";
+import {IFactory} from "../src/interfaces/IFactory.sol";
 
 contract MockHookToken is ERC20 {
     constructor() ERC20("Fund", "FUND") {}
@@ -78,6 +78,18 @@ contract MockHookRegistry {
     }
 }
 
+contract MockHookFactory {
+    mapping(address => IFactory.FundraisingProtocol) internal protocols;
+
+    function setProtocol(IFactory.FundraisingProtocol memory protocol) external {
+        protocols[protocol.fundraisingToken] = protocol;
+    }
+
+    function getProtocol(address fundraisingToken) external view returns (IFactory.FundraisingProtocol memory) {
+        return protocols[fundraisingToken];
+    }
+}
+
 contract MockMsgSender {
     address internal nextSender;
 
@@ -91,8 +103,8 @@ contract MockMsgSender {
 }
 
 contract FundraisingTokenHookHarness is FundraisingTokenHook {
-    constructor(address poolManager, address fundraisingToken, address vault, address registry)
-        FundraisingTokenHook(poolManager, fundraisingToken, vault, registry)
+    constructor(address poolManager, address factoryAddress, address usdc, address registry)
+        FundraisingTokenHook(poolManager, factoryAddress, usdc, registry)
     {}
 
     function validateHookAddress(BaseHook) internal pure override {}
@@ -132,12 +144,12 @@ contract FundraisingTokenHookHarness is FundraisingTokenHook {
         return _afterSwap(sender, key, params, delta, hookData);
     }
 
-    function exposedTreasuryBalancePercent() external view returns (uint256) {
-        return getTreasuryBalanceInPerecent();
+    function exposedTreasuryBalancePercent(PoolKey calldata key) external view returns (uint256) {
+        return getTreasuryBalanceInPerecent(key);
     }
 
-    function exposedCheckIfTaxIncurred(address sender) external view returns (bool) {
-        return checkIfTaxIncurred(sender);
+    function exposedCheckIfTaxIncurred(PoolKey calldata key, address sender) external view returns (bool) {
+        return checkIfTaxIncurred(key, sender);
     }
 
     function exposedGetMsgSender(address sender) external view returns (address) {
@@ -155,7 +167,9 @@ contract FundraisingTokenHookTest is Test {
     MockMsgSender internal router;
     MockMsgSender internal quoter;
     MockHookRegistry internal registry;
+    MockHookFactory internal factory;
     FundraisingTokenHookHarness internal hook;
+    MockHookToken internal usdc;
 
     address internal vault = address(0xA11CE);
     address internal user = address(0xB0B);
@@ -166,17 +180,28 @@ contract FundraisingTokenHookTest is Test {
         stateView = new MockHookStateView();
         router = new MockMsgSender();
         quoter = new MockMsgSender();
+        factory = new MockHookFactory();
+        usdc = new MockHookToken();
         registry = new MockHookRegistry(address(router), address(quoter), address(stateView));
 
-        hook = new FundraisingTokenHookHarness(address(poolManager), address(token), vault, address(registry));
+        hook = new FundraisingTokenHookHarness(address(poolManager), address(factory), address(usdc), address(registry));
+        factory.setProtocol(
+            IFactory.FundraisingProtocol({
+                fundraisingToken: address(token),
+                underlyingAddress: address(usdc),
+                vault: vault,
+                hook: address(hook),
+                isLPCreated: true
+            })
+        );
 
         token.mint(user, 1_000_000 ether);
         stateView.setState(0, 1_000_000);
     }
 
     function testConstructorAndPermissions() public view {
-        assertEq(hook.fundraisingTokenAddress(), address(token));
-        assertEq(hook.vault(), vault);
+        assertEq(hook.factoryAddress(), address(factory));
+        assertEq(hook.usdcAddress(), address(usdc));
         assertEq(hook.router(), address(router));
         assertEq(hook.quoter(), address(quoter));
         assertEq(hook.stateView(), address(stateView));
@@ -193,7 +218,7 @@ contract FundraisingTokenHookTest is Test {
     }
 
     function testObserveAndGetCurrentTick() public {
-        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        PoolKey memory key = _poolKey(address(token), address(usdc));
         hook.exposedAfterInitialize(key, 0, 5);
 
         uint32[] memory secondsAgos = new uint32[](2);
@@ -209,7 +234,7 @@ contract FundraisingTokenHookTest is Test {
     function testBeforeInitializeRejectsNonOraclePoolConfig() public {
         PoolKey memory invalidFee = PoolKey({
             currency0: Currency.wrap(address(token)),
-            currency1: Currency.wrap(address(0x1234)),
+            currency1: Currency.wrap(address(usdc)),
             fee: 1,
             tickSpacing: TickMath.MAX_TICK_SPACING,
             hooks: IHooks(address(0))
@@ -220,12 +245,12 @@ contract FundraisingTokenHookTest is Test {
     }
 
     function testBeforeInitializeAcceptsOraclePoolConfig() public {
-        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        PoolKey memory key = _poolKey(address(token), address(usdc));
         assertEq(hook.exposedBeforeInitialize(key, 0), BaseHook.beforeInitialize.selector);
     }
 
     function testBeforeAddLiquidityBranches() public {
-        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        PoolKey memory key = _poolKey(address(token), address(usdc));
         hook.exposedAfterInitialize(key, 0, 0);
 
         ModifyLiquidityParams memory negativeDelta =
@@ -249,7 +274,7 @@ contract FundraisingTokenHookTest is Test {
     }
 
     function testBeforeSwapNonSellingPathDoesNotTakeFee() public {
-        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        PoolKey memory key = _poolKey(address(token), address(usdc));
         hook.exposedAfterInitialize(key, 0, 0);
 
         SwapParams memory params = SwapParams({zeroForOne: false, amountSpecified: -100 ether, sqrtPriceLimitX96: 0});
@@ -260,7 +285,7 @@ contract FundraisingTokenHookTest is Test {
     }
 
     function testBeforeSwapSellingPathTakesFee() public {
-        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        PoolKey memory key = _poolKey(address(token), address(usdc));
         hook.exposedAfterInitialize(key, 0, 0);
 
         vm.roll(block.number + 20);
@@ -276,7 +301,7 @@ contract FundraisingTokenHookTest is Test {
     }
 
     function testBeforeSwapRejectsOversizedFeeCast() public {
-        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        PoolKey memory key = _poolKey(address(token), address(usdc));
         hook.exposedAfterInitialize(key, 0, 0);
 
         vm.roll(block.number + 20);
@@ -289,7 +314,7 @@ contract FundraisingTokenHookTest is Test {
     }
 
     function testAfterSwapHandlesMaxDeltaWithoutOverflow() public {
-        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        PoolKey memory key = _poolKey(address(token), address(usdc));
         hook.exposedAfterInitialize(key, 0, 0);
 
         vm.roll(block.number + 20);
@@ -302,7 +327,7 @@ contract FundraisingTokenHookTest is Test {
     }
 
     function testAfterSwapNonBuyingAndZeroOutputBranches() public {
-        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        PoolKey memory key = _poolKey(address(token), address(usdc));
         hook.exposedAfterInitialize(key, 0, 0);
 
         SwapParams memory notBuying = SwapParams({zeroForOne: true, amountSpecified: -10 ether, sqrtPriceLimitX96: 0});
@@ -315,7 +340,7 @@ contract FundraisingTokenHookTest is Test {
     }
 
     function testAfterSwapBuyRestrictionsAndCooldown() public {
-        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        PoolKey memory key = _poolKey(address(token), address(usdc));
         hook.exposedAfterInitialize(key, 0, 0);
 
         SwapParams memory buying = SwapParams({zeroForOne: false, amountSpecified: -10 ether, sqrtPriceLimitX96: 0});
@@ -330,14 +355,14 @@ contract FundraisingTokenHookTest is Test {
 
         (, int128 fee) = hook.exposedAfterSwap(address(router), key, buying, toBalanceDelta(100 ether, 0), bytes(""));
         assertEq(fee, int128(int256(1 ether)));
-        assertEq(hook.lastBuyTimestamp(user), block.timestamp);
+        assertEq(hook.lastBuyTimestamp(address(token), user), block.timestamp);
 
         vm.expectRevert(FundraisingTokenHook.CoolDownPeriodNotPassed.selector);
         hook.exposedAfterSwap(address(router), key, buying, toBalanceDelta(100 ether, 0), bytes(""));
     }
 
     function testAfterSwapNoTaxWhenSenderIsExemptOrThresholdReached() public {
-        PoolKey memory key = _poolKey(address(token), address(0x1234));
+        PoolKey memory key = _poolKey(address(token), address(usdc));
         hook.exposedAfterInitialize(key, 0, 0);
 
         vm.roll(block.number + 20);
@@ -358,9 +383,10 @@ contract FundraisingTokenHookTest is Test {
     }
 
     function testTreasuryPercentTaxFlagAndMsgSenderBranches() public {
-        assertEq(hook.exposedTreasuryBalancePercent(), 0);
-        assertTrue(hook.exposedCheckIfTaxIncurred(user));
-        assertFalse(hook.exposedCheckIfTaxIncurred(vault));
+        PoolKey memory key = _poolKey(address(token), address(usdc));
+        assertEq(hook.exposedTreasuryBalancePercent(key), 0);
+        assertTrue(hook.exposedCheckIfTaxIncurred(key, user));
+        assertFalse(hook.exposedCheckIfTaxIncurred(key, vault));
 
         router.setMsgSender(user);
         quoter.setMsgSender(vault);
@@ -374,10 +400,19 @@ contract FundraisingTokenHookTest is Test {
 
     function testTreasuryPercentReturnsZeroWhenTotalSupplyIsZero() public {
         ZeroSupplyHookToken zeroSupplyToken = new ZeroSupplyHookToken();
+        factory.setProtocol(
+            IFactory.FundraisingProtocol({
+                fundraisingToken: address(zeroSupplyToken),
+                underlyingAddress: address(usdc),
+                vault: vault,
+                hook: address(0),
+                isLPCreated: true
+            })
+        );
         FundraisingTokenHookHarness zeroSupplyHook =
-            new FundraisingTokenHookHarness(address(poolManager), address(zeroSupplyToken), vault, address(registry));
+            new FundraisingTokenHookHarness(address(poolManager), address(factory), address(usdc), address(registry));
 
-        assertEq(zeroSupplyHook.exposedTreasuryBalancePercent(), 0);
+        assertEq(zeroSupplyHook.exposedTreasuryBalancePercent(_poolKey(address(zeroSupplyToken), address(usdc))), 0);
     }
 
     function _poolKey(address currency0, address currency1) internal pure returns (PoolKey memory) {

@@ -30,6 +30,7 @@ contract Factory is IFactory, Ownable {
     error OnlySelf();
     error PositionManagerCallFailed();
     error InsufficientFundraisingTokenBalance();
+    error HookNotConfigured();
 
     address public immutable registryAddress;
     address public immutable emergencyManagerAddress;
@@ -163,12 +164,10 @@ contract Factory is IFactory, Ownable {
      * @param _fundraisingToken The fundraising token address used as the protocol key.
      * @param _amount0 The liquidity amount for token0 (can be native ETH if `address(0)` is underlying).
      * @param _amount1 The liquidity amount for token1 (fundraising token).
-     * @param _hookAddress The shared hook address that will be attached to the created pool.
-     *
      * @custom:security Caller must ensure:
      *                  - ERC20 approvals are granted to this contract for both tokens.
      *                  - Sufficient balances are available.
-     *                  - The provided hook address is a valid deployed hook compatible with Uniswap V4.
+     *                  - A valid shared hook has already been deployed and registered in IntegrationRegistry.
      *
      * @custom:effects
      *      - Transfers liquidity assets into the contract.
@@ -178,16 +177,17 @@ contract Factory is IFactory, Ownable {
      * @custom:event Emits {LiquidityPoolCreated} with underlying token, fundraising token, and owner.
      */
 
-    function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1, address _hookAddress)
+    function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1)
         external
         nonZeroAddress(_fundraisingToken)
         nonZeroAmount(_amount0)
         nonZeroAmount(_amount1)
-        nonZeroAddress(_hookAddress)
         onlyOwner
     {
-        address positionManager = IIntegrationRegistry(registryAddress).positionManager();
-        address permit2 = IIntegrationRegistry(registryAddress).permit2();
+        IIntegrationRegistry registry = IIntegrationRegistry(registryAddress);
+        address positionManager = registry.positionManager();
+        address permit2 = registry.permit2();
+        address hookAddress = registry.hookAddress();
 
         bytes[] memory params = new bytes[](2);
 
@@ -197,6 +197,7 @@ contract Factory is IFactory, Ownable {
         }
         if (_protocol.isLPCreated) revert PoolAlreadyExists();
         if (_protocol.underlyingAddress != usdcAddress) revert UnsupportedUnderlyingAsset();
+        if (hookAddress == address(0)) revert HookNotConfigured();
 
         address _currency0 = _protocol.underlyingAddress;
         address _currency1 = _protocol.fundraisingToken;
@@ -208,7 +209,6 @@ contract Factory is IFactory, Ownable {
         }
 
         IERC20Metadata(_protocol.underlyingAddress).safeTransferFrom(msg.sender, address(this), _amount0);
-
 
         if (_currency0 > _currency1) {
             (_currency0, _currency1) = (_currency1, _currency0);
@@ -226,11 +226,11 @@ contract Factory is IFactory, Ownable {
             currency1: currency1,
             fee: 0,
             tickSpacing: TickMath.MAX_TICK_SPACING,
-            hooks: IHooks(_hookAddress)
+            hooks: IHooks(hookAddress)
         });
 
         // set hook address in vault
-        Vault(_protocol.vault).setHookAddress(_hookAddress);
+        Vault(_protocol.vault).setHookAddress(hookAddress);
 
         params[0] = abi.encodeWithSelector(IPoolInitializer_v4.initializePool.selector, pool, _startingPrice);
         params[1] = getModifyLiqiuidityParams(pool, amount0, amount1, _startingPrice);
@@ -275,7 +275,7 @@ contract Factory is IFactory, Ownable {
         }
 
         _protocol.isLPCreated = true;
-        _protocol.hook = _hookAddress;
+        _protocol.hook = hookAddress;
         poolKeys[_protocol.fundraisingToken] = pool;
 
         emit LiquidityPoolCreated(_protocol.underlyingAddress, _protocol.fundraisingToken, _fundraisingToken);

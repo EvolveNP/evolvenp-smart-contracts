@@ -26,6 +26,8 @@ interface IIntegrationRegistry {
 
     function hookDeployer() external view returns (address);
 
+    function hookAddress() external view returns (address);
+
     function emergencyManager() external view returns (address);
 
     function isAllowedCodehash(Endpoint endpoint, bytes32 codehash) external view returns (bool);

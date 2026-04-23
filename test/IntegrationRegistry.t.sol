@@ -19,6 +19,23 @@ contract MockEmergencyState {
 
 contract MockEndpoint {}
 
+contract MockRegistryHookDeployer {
+    address public hookToReturn;
+    bool public shouldRevert;
+    bytes32 public lastSalt;
+
+    function configure(address hook_, bool revert_) external {
+        hookToReturn = hook_;
+        shouldRevert = revert_;
+    }
+
+    function deployHook(bytes32 salt) external returns (address) {
+        lastSalt = salt;
+        if (shouldRevert) revert("hook deploy failed");
+        return hookToReturn;
+    }
+}
+
 contract IntegrationRegistryTest is Test {
     MockEmergencyState internal emergencyState;
     MockEndpoint internal router;
@@ -27,7 +44,7 @@ contract IntegrationRegistryTest is Test {
     MockEndpoint internal poolManager;
     MockEndpoint internal positionManager;
     MockEndpoint internal stateView;
-    MockEndpoint internal hookDeployer;
+    MockRegistryHookDeployer internal hookDeployer;
 
     IntegrationRegistry internal registry;
 
@@ -39,7 +56,7 @@ contract IntegrationRegistryTest is Test {
         poolManager = new MockEndpoint();
         positionManager = new MockEndpoint();
         stateView = new MockEndpoint();
-        hookDeployer = new MockEndpoint();
+        hookDeployer = new MockRegistryHookDeployer();
 
         registry = new IntegrationRegistry(
             address(router),
@@ -65,6 +82,31 @@ contract IntegrationRegistryTest is Test {
             address(hookDeployer),
             address(emergencyState)
         );
+    }
+
+    function testDeployHookOnlyOwnerAndOnlyOnce() public {
+        address deployedHook = address(new MockEndpoint());
+        hookDeployer.configure(deployedHook, false);
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert();
+        registry.deployHook(bytes32("salt"));
+
+        address returnedHook = registry.deployHook(bytes32("salt"));
+
+        assertEq(returnedHook, deployedHook);
+        assertEq(registry.hookAddress(), deployedHook);
+        assertEq(hookDeployer.lastSalt(), bytes32("salt"));
+
+        vm.expectRevert(IntegrationRegistry.HookAlreadyDeployed.selector);
+        registry.deployHook(bytes32("salt2"));
+    }
+
+    function testDeployHookBubblesFailureAsRegistryError() public {
+        hookDeployer.configure(address(0), true);
+
+        vm.expectRevert(IntegrationRegistry.HookDeploymentFailed.selector);
+        registry.deployHook(bytes32("salt"));
     }
 
     function testSetAllowedAddressRejectsAddressesWithoutCode() public {

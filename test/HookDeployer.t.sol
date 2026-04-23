@@ -50,14 +50,14 @@ contract HookDeployerTest is Test {
     }
 
     function testDeployHookOnlyFactoryAllowed() public {
-        vm.expectRevert(HookDeployer.onlyFactoryAllowed.selector);
+        vm.expectRevert(HookDeployer.onlyRegistryAllowed.selector);
         deployer.deployHook(bytes32("salt"));
     }
 
     function testDeployHookUsesRegistryEndpoints() public {
         bytes32 salt = deployer.findSalt();
 
-        vm.prank(factory);
+        vm.prank(address(registry));
         address hookAddress = deployer.deployHook(salt);
 
         FundraisingTokenHook hook = FundraisingTokenHook(hookAddress);

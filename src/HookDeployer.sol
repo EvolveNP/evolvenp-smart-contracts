@@ -10,8 +10,9 @@ contract HookDeployer {
     IIntegrationRegistry public integrationRegistry;
     address public factoryAddress;
     address public usdcAddress;
+    address public registryAddress;
 
-    error onlyFactoryAllowed();
+    error onlyRegistryAllowed();
     error ZeroAddress();
 
     modifier nonZeroAddress(address addr) {
@@ -19,9 +20,9 @@ contract HookDeployer {
         _;
     }
 
-    modifier onlyFactory() {
-        if (msg.sender != factoryAddress) {
-            revert onlyFactoryAllowed();
+    modifier onlyRegistry() {
+        if (msg.sender != registryAddress) {
+            revert onlyRegistryAllowed();
         }
         _;
     }
@@ -33,14 +34,16 @@ contract HookDeployer {
     {
         factoryAddress = _factoryAddress;
         usdcAddress = _usdcAddress;
+        registryAddress = _integrationRegistryAddress;
         integrationRegistry = IIntegrationRegistry(_integrationRegistryAddress);
     }
 
-    function deployHook(bytes32 salt) external onlyFactory returns (address) {
+    function deployHook(bytes32 salt) external onlyRegistry returns (address) {
         address poolManager = integrationRegistry.poolManager();
 
-        FundraisingTokenHook hook =
-            new FundraisingTokenHook{salt: salt}(poolManager, factoryAddress, usdcAddress, address(integrationRegistry));
+        FundraisingTokenHook hook = new FundraisingTokenHook{salt: salt}(
+            poolManager, factoryAddress, usdcAddress, address(integrationRegistry)
+        );
         return address(hook);
     }
 

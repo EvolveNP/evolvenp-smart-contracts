@@ -448,7 +448,11 @@ contract FundraisingTokenHook is BaseHook {
         return integrationRegistry.stateView();
     }
 
-    function _getFundraisingContext(PoolKey calldata key) internal view returns (address fundraisingTokenAddress, address vault) {
+    function _getFundraisingContext(PoolKey calldata key)
+        internal
+        view
+        returns (address fundraisingTokenAddress, address vault)
+    {
         address currency0 = Currency.unwrap(key.currency0);
         address currency1 = Currency.unwrap(key.currency1);
 

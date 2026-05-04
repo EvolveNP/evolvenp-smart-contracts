@@ -158,8 +158,10 @@ contract EmergencyManagerTest is Test {
         assertEq(manager.emergencyExpiresAt(), 0);
         (uint64 quoteConsecutive) = manager.quoteFailures();
         (uint64 swapConsecutive) = manager.swapFailures();
+        (uint64 endpointConsecutive) = manager.endpointFailures();
         assertEq(quoteConsecutive, 0);
         assertEq(swapConsecutive, 0);
+        assertEq(endpointConsecutive, 0);
     }
 
     function testSwapFailuresRemainConsecutiveUntilSuccess() public {

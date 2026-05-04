@@ -178,9 +178,13 @@ contract FundraisingTokenHook is BaseHook {
     {
         bytes32 id = PoolId.unwrap(key.toId());
         (address fundraisingTokenAddress,) = _getFundraisingContext(key);
+
         launchTimestampByToken[fundraisingTokenAddress] = block.timestamp;
+
         launchBlockByToken[fundraisingTokenAddress] = block.number;
+
         (states[id].cardinality, states[id].cardinalityNext) = observations[id].initialize(_blockTimestamp(), tick);
+
         return BaseHook.afterInitialize.selector;
     }
 

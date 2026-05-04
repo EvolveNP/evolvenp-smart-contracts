@@ -110,8 +110,16 @@ contract IntegrationRegistryTest is Test {
     }
 
     function testSetAllowedAddressRejectsAddressesWithoutCode() public {
+        emergencyState.setActive(true);
         vm.expectRevert(IntegrationRegistry.NoCodeAtAddress.selector);
         registry.setAllowedAddress(IntegrationRegistry.Endpoint.ROUTER, address(0x1234), true);
+    }
+
+    function testSetAllowedAddressRequiresActiveEmergency() public {
+        address newRouter = address(new MockEndpoint());
+        emergencyState.setActive(false);
+        vm.expectRevert(IntegrationRegistry.EmergencyIsNotActive.selector);
+        registry.setAllowedAddress(IntegrationRegistry.Endpoint.ROUTER, newRouter, true);
     }
 
     function testUpdateIntegrationRequiresAllowlistedAddress() public {
@@ -123,7 +131,9 @@ contract IntegrationRegistryTest is Test {
 
     function testUpdateIntegrationRequiresActiveEmergency() public {
         address newRouter = address(new MockEndpoint());
+        emergencyState.setActive(true);
         registry.setAllowedAddress(IntegrationRegistry.Endpoint.ROUTER, newRouter, true);
+        emergencyState.setActive(false);
 
         vm.expectRevert(IntegrationRegistry.EmergencyIsNotActive.selector);
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.ROUTER, newRouter);
@@ -158,6 +168,7 @@ contract IntegrationRegistryTest is Test {
     }
 
     function testSetAllowedAddressCanRemoveAddress() public {
+        emergencyState.setActive(true);
         address newRouter = _allowlistedEndpoint(IntegrationRegistry.Endpoint.ROUTER);
         assertTrue(registry.isAllowedAddress(IntegrationRegistry.Endpoint.ROUTER, newRouter));
 

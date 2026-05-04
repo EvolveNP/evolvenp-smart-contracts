@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {FundraisingTokenHook} from "./FundraisingTokenHook.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
-import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 
 contract HookDeployer {
@@ -11,9 +10,11 @@ contract HookDeployer {
     address public factoryAddress;
     address public usdcAddress;
     address public registryAddress;
+    uint256 internal constant MAX_SALT_SEARCH = 160_444;
 
     error onlyRegistryAllowed();
     error ZeroAddress();
+    error SaltNotFound();
 
     modifier nonZeroAddress(address addr) {
         if (addr == address(0)) revert ZeroAddress();
@@ -64,13 +65,25 @@ contract HookDeployer {
                 | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
                 | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
+        flags = flags & Hooks.ALL_HOOK_MASK;
 
         address poolManager = integrationRegistry.poolManager();
-        // Mine a salt that will produce a hook address with the correct flags
         bytes memory constructorArgs =
             abi.encode(poolManager, factoryAddress, usdcAddress, address(integrationRegistry));
-        (, bytes32 salt) =
-            HookMiner.find(address(this), flags, type(FundraisingTokenHook).creationCode, constructorArgs);
-        return salt;
+        bytes32 creationCodeHash = keccak256(abi.encodePacked(type(FundraisingTokenHook).creationCode, constructorArgs));
+
+        for (uint256 salt; salt < MAX_SALT_SEARCH; ++salt) {
+            address hookAddress = address(
+                uint160(
+                    uint256(keccak256(abi.encodePacked(bytes1(0xFF), address(this), bytes32(salt), creationCodeHash)))
+                )
+            );
+
+            if ((uint160(hookAddress) & Hooks.ALL_HOOK_MASK) == flags && hookAddress.code.length == 0) {
+                return bytes32(salt);
+            }
+        }
+
+        revert SaltNotFound();
     }
 }

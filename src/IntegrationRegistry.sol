@@ -110,6 +110,7 @@ contract IntegrationRegistry is Ownable {
 
     function setAllowedAddress(Endpoint endpoint, address newAddress, bool allowed) external onlyOwner {
         if (newAddress.code.length == 0) revert NoCodeAtAddress();
+        if (!IEmergencyManager(emergencyManager).isEmergencyActive()) revert EmergencyIsNotActive();
         isAllowedAddress[endpoint][newAddress] = allowed;
         emit AllowListConfigured(endpoint, newAddress, allowed);
     }

@@ -71,10 +71,23 @@ contract MockHookRegistry {
     address public hookDeployer;
     address public emergencyManager;
 
-    constructor(address router_, address quoter_, address stateView_) {
+    constructor(address router_, address quoter_, address stateView_, address emergencyManager_) {
         router = router_;
         quoter = quoter_;
         stateView = stateView_;
+        emergencyManager = emergencyManager_;
+    }
+}
+
+contract MockHookEmergencyManager {
+    bool internal active;
+
+    function setEmergencyActive(bool active_) external {
+        active = active_;
+    }
+
+    function isEmergencyActive() external view returns (bool) {
+        return active;
     }
 }
 
@@ -167,6 +180,7 @@ contract FundraisingTokenHookTest is Test {
     MockMsgSender internal router;
     MockMsgSender internal quoter;
     MockHookRegistry internal registry;
+    MockHookEmergencyManager internal emergencyManager;
     MockHookFactory internal factory;
     FundraisingTokenHookHarness internal hook;
     MockHookToken internal usdc;
@@ -180,9 +194,10 @@ contract FundraisingTokenHookTest is Test {
         stateView = new MockHookStateView();
         router = new MockMsgSender();
         quoter = new MockMsgSender();
+        emergencyManager = new MockHookEmergencyManager();
         factory = new MockHookFactory();
         usdc = new MockHookToken();
-        registry = new MockHookRegistry(address(router), address(quoter), address(stateView));
+        registry = new MockHookRegistry(address(router), address(quoter), address(stateView), address(emergencyManager));
 
         hook = new FundraisingTokenHookHarness(address(poolManager), address(factory), address(usdc), address(registry));
         factory.setProtocol(
@@ -380,6 +395,26 @@ contract FundraisingTokenHookTest is Test {
         (, int128 feeWhenThresholdReached) =
             hook.exposedAfterSwap(address(router), key, buying, toBalanceDelta(100 ether, 0), bytes(""));
         assertEq(feeWhenThresholdReached, 0);
+    }
+
+    function testTaxRoutingStopsWhenEmergencyIsActive() public {
+        PoolKey memory key = _poolKey(address(token), address(usdc));
+        hook.exposedAfterInitialize(key, 0, 0);
+
+        vm.roll(block.number + 20);
+        vm.warp(block.timestamp + 2 hours);
+        emergencyManager.setEmergencyActive(true);
+
+        SwapParams memory selling = SwapParams({zeroForOne: true, amountSpecified: -100 ether, sqrtPriceLimitX96: 0});
+        (, BeforeSwapDelta sellDelta,) = hook.exposedBeforeSwap(user, key, selling, bytes(""));
+        assertEq(int256(sellDelta.getSpecifiedDelta()), 0);
+        assertEq(poolManager.lastTakeAmount(), 0);
+
+        SwapParams memory buying = SwapParams({zeroForOne: false, amountSpecified: -10 ether, sqrtPriceLimitX96: 0});
+        router.setMsgSender(user);
+        (, int128 buyFee) = hook.exposedAfterSwap(address(router), key, buying, toBalanceDelta(100 ether, 0), bytes(""));
+        assertEq(buyFee, 0);
+        assertEq(poolManager.lastTakeAmount(), 0);
     }
 
     function testTreasuryPercentTaxFlagAndMsgSenderBranches() public {

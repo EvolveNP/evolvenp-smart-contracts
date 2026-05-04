@@ -18,6 +18,7 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {TruncatedOracle} from "@uniswap/v4-periphery-trunc/libraries/TruncatedOracle.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 import {IFactory} from "./interfaces/IFactory.sol";
+import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 
 /**
  * @title FundraisingTokenHook
@@ -407,6 +408,9 @@ contract FundraisingTokenHook is BaseHook {
      */
     function checkIfTaxIncurred(PoolKey calldata key, address sender) internal view returns (bool) {
         (, address vault) = _getFundraisingContext(key);
+        if (IEmergencyManager(integrationRegistry.emergencyManager()).isEmergencyActive()) {
+            return false;
+        }
         return (getTreasuryBalanceInPerecent(key) < maximumThreshold) && sender != vault;
     }
 

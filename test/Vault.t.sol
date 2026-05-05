@@ -120,13 +120,22 @@ contract MockVaultIntegrationRegistry {
 
 contract MockVaultFactory {
     PoolKey internal poolKey;
+    bool internal authorized = true;
 
     function setPoolKey(PoolKey memory newPoolKey) external {
         poolKey = newPoolKey;
     }
 
+    function setAuthorized(bool authorized_) external {
+        authorized = authorized_;
+    }
+
     function getPoolKeys(address) external view returns (PoolKey memory) {
         return poolKey;
+    }
+
+    function isAuthorizedHookPool(address, PoolKey calldata, address) external view returns (bool) {
+        return authorized;
     }
 }
 

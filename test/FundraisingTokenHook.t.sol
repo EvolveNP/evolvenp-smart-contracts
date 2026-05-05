@@ -93,13 +93,22 @@ contract MockHookEmergencyManager {
 
 contract MockHookFactory {
     mapping(address => IFactory.FundraisingProtocol) internal protocols;
+    bool internal authorized = true;
 
     function setProtocol(IFactory.FundraisingProtocol memory protocol) external {
         protocols[protocol.fundraisingToken] = protocol;
     }
 
+    function setAuthorized(bool authorized_) external {
+        authorized = authorized_;
+    }
+
     function getProtocol(address fundraisingToken) external view returns (IFactory.FundraisingProtocol memory) {
         return protocols[fundraisingToken];
+    }
+
+    function isAuthorizedHookPool(address, PoolKey calldata, address) external view returns (bool) {
+        return authorized;
     }
 }
 
@@ -262,6 +271,14 @@ contract FundraisingTokenHookTest is Test {
     function testBeforeInitializeAcceptsOraclePoolConfig() public {
         PoolKey memory key = _poolKey(address(token), address(usdc));
         assertEq(hook.exposedBeforeInitialize(key, 0), BaseHook.beforeInitialize.selector);
+    }
+
+    function testBeforeInitializeRejectsUnauthorizedPool() public {
+        PoolKey memory key = _poolKey(address(token), address(usdc));
+        factory.setAuthorized(false);
+
+        vm.expectRevert(FundraisingTokenHook.InvalidPool.selector);
+        hook.exposedBeforeInitialize(key, 0);
     }
 
     function testBeforeAddLiquidityBranches() public {

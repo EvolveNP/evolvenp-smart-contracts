@@ -13,4 +13,8 @@ interface IFactory {
 
     function getProtocol(address _owner) external view returns (FundraisingProtocol memory);
     function getPoolKeys(address _fundraisingTokenAddress) external view returns (PoolKey memory);
+    function isAuthorizedHookPool(address fundraisingToken, PoolKey calldata key, address hookAddress)
+        external
+        view
+        returns (bool);
 }

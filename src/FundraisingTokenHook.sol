@@ -168,6 +168,12 @@ contract FundraisingTokenHook is BaseHook {
         if (key.fee != 0 || key.tickSpacing != TickMath.MAX_TICK_SPACING) {
             revert OnlyOneOraclePoolAllowed();
         }
+
+        (address fundraisingTokenAddress,) = _getFundraisingContext(key);
+
+        if (!IFactory(factoryAddress).isAuthorizedHookPool(fundraisingTokenAddress, key, address(this))) {
+            revert InvalidPool();
+        }
         return BaseHook.beforeInitialize.selector;
     }
 
@@ -474,6 +480,9 @@ contract FundraisingTokenHook is BaseHook {
 
         IFactory.FundraisingProtocol memory protocol = IFactory(factoryAddress).getProtocol(fundraisingTokenAddress);
         if (protocol.fundraisingToken != fundraisingTokenAddress || protocol.vault == address(0)) revert InvalidPool();
+        if (!IFactory(factoryAddress).isAuthorizedHookPool(fundraisingTokenAddress, key, address(this))) {
+            revert InvalidPool();
+        }
 
         vault = protocol.vault;
     }

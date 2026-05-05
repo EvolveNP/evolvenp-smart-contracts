@@ -25,6 +25,8 @@ contract Vault is Swap {
     error NotFactory();
     error OnlySelf();
     error NoBeneficiaries();
+    error ZeroBeneficiary();
+    error DuplicateBeneficiary();
     error ZeroSwapAmount();
     error SellCheckFailed();
     error QuoteFailed();
@@ -82,6 +84,7 @@ contract Vault is Swap {
     {
         if (_intervalSeconds == 0) revert InvalidInterval();
         if (_swapPercentage == 0 || _swapPercentage > 1e18) revert InvalidSwapPercentage();
+        _validateBeneficiaries(_beneficiaries);
         underlyingAsset = _underlyingAsset;
         intervalSeconds = _intervalSeconds;
         beneficiaries = _beneficiaries;
@@ -234,6 +237,20 @@ contract Vault is Swap {
     function _finalizeSuccessfulExecution(uint256 amountOut) internal {
         _distributeProceeds(amountOut);
         lastSuccessAt = block.timestamp;
+    }
+
+    function _validateBeneficiaries(address[] memory _beneficiaries) internal pure {
+        uint256 beneficiaryCount = _beneficiaries.length;
+        if (beneficiaryCount == 0) revert NoBeneficiaries();
+
+        for (uint256 i; i < beneficiaryCount; ++i) {
+            address beneficiary = _beneficiaries[i];
+            if (beneficiary == address(0)) revert ZeroBeneficiary();
+
+            for (uint256 j = i + 1; j < beneficiaryCount; ++j) {
+                if (beneficiary == _beneficiaries[j]) revert DuplicateBeneficiary();
+            }
+        }
     }
 
     function _getPoolKey() internal view returns (PoolKey memory key, bool isCurrency0FundraisingToken) {

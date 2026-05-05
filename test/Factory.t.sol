@@ -171,6 +171,19 @@ contract FactoryTest is Test {
         vm.prank(protocolAdmin);
         vm.expectRevert(Factory.UnsupportedUnderlyingAsset.selector);
         factory.createFundraisingVault("Fund", "FUND", address(0x1234), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
+
+        address[] memory zeroBeneficiary = new address[](1);
+        zeroBeneficiary[0] = address(0);
+        vm.prank(protocolAdmin);
+        vm.expectRevert(Vault.ZeroBeneficiary.selector);
+        factory.createFundraisingVault("Fund", "FUND", address(usdc), zeroBeneficiary, 30 days, 5e17, 1e6, 1000);
+
+        address[] memory duplicateBeneficiaries = new address[](2);
+        duplicateBeneficiaries[0] = address(0x1111);
+        duplicateBeneficiaries[1] = address(0x1111);
+        vm.prank(protocolAdmin);
+        vm.expectRevert(Vault.DuplicateBeneficiary.selector);
+        factory.createFundraisingVault("Fund", "FUND", address(usdc), duplicateBeneficiaries, 30 days, 5e17, 1e6, 1000);
     }
 
     function testCreateFundraisingVaultDeploysVaultAndToken() public {

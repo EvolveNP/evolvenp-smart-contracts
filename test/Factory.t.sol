@@ -9,6 +9,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Factory} from "../src/Factory.sol";
 import {IFactory} from "../src/interfaces/IFactory.sol";
 import {IIntegrationRegistry} from "../src/interfaces/IIntegrationRegistry.sol";
+import {Vault} from "../src/Vault.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
@@ -234,7 +235,7 @@ contract FactoryTest is Test {
         vm.prank(protocolAdmin);
         factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
 
-        (address fundraisingToken,) = _decodeCreatedVault();
+        (address fundraisingToken, address vault) = _decodeCreatedVault();
         usdc.mint(protocolAdmin, 1_000_000e6);
 
         vm.startPrank(protocolAdmin);
@@ -245,6 +246,7 @@ contract FactoryTest is Test {
         IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
         assertTrue(protocol.isLPCreated);
         assertEq(protocol.hook, fakeHook);
+        assertEq(Vault(vault).hookAddress(), fakeHook);
 
         PoolKey memory poolKey = factory.getPoolKeys(fundraisingToken);
         address storedCurrency0 = Currency.unwrap(poolKey.currency0);
@@ -276,7 +278,7 @@ contract FactoryTest is Test {
         vm.recordLogs();
         vm.prank(protocolAdmin);
         factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
-        (address fundraisingToken,) = _decodeCreatedVault();
+        (address fundraisingToken, address vault) = _decodeCreatedVault();
 
         permit2.setShouldRevert(true);
         usdc.mint(protocolAdmin, 100e6);
@@ -297,13 +299,15 @@ contract FactoryTest is Test {
         assertEq(usdc.balanceOf(address(factory)), 0);
         IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
         assertFalse(protocol.isLPCreated);
+        assertEq(protocol.hook, address(0));
+        assertEq(Vault(vault).hookAddress(), address(0));
     }
 
     function testCreatePoolRevertsWhenSecondPermit2ApprovalFails() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
         factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
-        (address fundraisingToken,) = _decodeCreatedVault();
+        (address fundraisingToken, address vault) = _decodeCreatedVault();
 
         permit2.setRevertOnCall(2);
         usdc.mint(protocolAdmin, 100e6);
@@ -324,13 +328,15 @@ contract FactoryTest is Test {
         assertEq(usdc.balanceOf(address(factory)), 0);
         IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
         assertFalse(protocol.isLPCreated);
+        assertEq(protocol.hook, address(0));
+        assertEq(Vault(vault).hookAddress(), address(0));
     }
 
     function testCreatePoolRevertsWhenPositionManagerFails() public {
         vm.recordLogs();
         vm.prank(protocolAdmin);
         factory.createFundraisingVault("Fund", "FUND", address(usdc), _beneficiaries(), 30 days, 5e17, 1e6, 1000);
-        (address fundraisingToken,) = _decodeCreatedVault();
+        (address fundraisingToken, address vault) = _decodeCreatedVault();
 
         positionManager.setShouldRevert(true);
         usdc.mint(protocolAdmin, 100e6);
@@ -352,6 +358,8 @@ contract FactoryTest is Test {
         assertEq(usdc.balanceOf(address(factory)), 0);
         IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
         assertFalse(protocol.isLPCreated);
+        assertEq(protocol.hook, address(0));
+        assertEq(Vault(vault).hookAddress(), address(0));
     }
 
     function testCreatePoolRevertsWhenAlreadyCreated() public {

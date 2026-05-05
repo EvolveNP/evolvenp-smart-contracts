@@ -234,9 +234,6 @@ contract Factory is IFactory, Ownable {
 
         pendingHookPoolIds[_protocol.fundraisingToken] = PoolId.unwrap(pool.toId());
 
-        // set hook address in vault
-        Vault(_protocol.vault).setHookAddress(hookAddress);
-
         params[0] = abi.encodeWithSelector(IPoolInitializer_v4.initializePool.selector, pool, _startingPrice);
         params[1] = getModifyLiqiuidityParams(pool, amount0, amount1, _startingPrice);
 
@@ -283,6 +280,7 @@ contract Factory is IFactory, Ownable {
         _protocol.hook = hookAddress;
         poolKeys[_protocol.fundraisingToken] = pool;
         delete pendingHookPoolIds[_protocol.fundraisingToken];
+        Vault(_protocol.vault).setHookAddress(hookAddress);
 
         emit LiquidityPoolCreated(_protocol.underlyingAddress, _protocol.fundraisingToken, _fundraisingToken);
     }

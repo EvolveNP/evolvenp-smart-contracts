@@ -20,13 +20,14 @@ contract IntegrationRegistry is Ownable {
     error EmergencyIsNotActive();
     error NotAllowedAtAddress();
     error NoCodeAtAddress();
+    error ImmutableEndpoint();
     error HookAlreadyDeployed();
     error HookDeploymentFailed();
 
     address public router; // The address of the uniswap universal router
     address public permit2; // The address of the uniswap permit2 contract
     address public quoter; // The address of the uniswap v4 quoter
-    address public poolManager; // The address of the uniswap v4 pool manager
+    address public immutable poolManager; // The address of the uniswap v4 pool manager
     address public positionManager; // The address of the uniswap v4 position manager
     address public stateView; // The address of the uniswap v4 state view
     address public hookDeployer; // The address of the hook deployer contract
@@ -79,6 +80,7 @@ contract IntegrationRegistry is Ownable {
         onlyOwner
         nonZeroAddress(newAddress)
     {
+        if (endpoint == Endpoint.POOL_MANAGER) revert ImmutableEndpoint();
         if (!isAllowedAddress[endpoint][newAddress]) revert NotAllowedAtAddress();
         if (!IEmergencyManager(emergencyManager).isEmergencyActive()) revert EmergencyIsNotActive();
         address currentAddress;
@@ -91,9 +93,6 @@ contract IntegrationRegistry is Ownable {
         } else if (endpoint == Endpoint.QUOTER) {
             currentAddress = quoter;
             quoter = newAddress;
-        } else if (endpoint == Endpoint.POOL_MANAGER) {
-            currentAddress = poolManager;
-            poolManager = newAddress;
         } else if (endpoint == Endpoint.POSITION_MANAGER) {
             currentAddress = positionManager;
             positionManager = newAddress;
@@ -109,6 +108,7 @@ contract IntegrationRegistry is Ownable {
     }
 
     function setAllowedAddress(Endpoint endpoint, address newAddress, bool allowed) external onlyOwner {
+        if (endpoint == Endpoint.POOL_MANAGER) revert ImmutableEndpoint();
         if (newAddress.code.length == 0) revert NoCodeAtAddress();
         if (!IEmergencyManager(emergencyManager).isEmergencyActive()) revert EmergencyIsNotActive();
         isAllowedAddress[endpoint][newAddress] = allowed;

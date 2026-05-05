@@ -145,7 +145,6 @@ contract IntegrationRegistryTest is Test {
         address newRouter = _allowlistedEndpoint(IntegrationRegistry.Endpoint.ROUTER);
         address newPermit2 = _allowlistedEndpoint(IntegrationRegistry.Endpoint.PERMIT2);
         address newQuoter = _allowlistedEndpoint(IntegrationRegistry.Endpoint.QUOTER);
-        address newPoolManager = _allowlistedEndpoint(IntegrationRegistry.Endpoint.POOL_MANAGER);
         address newPositionManager = _allowlistedEndpoint(IntegrationRegistry.Endpoint.POSITION_MANAGER);
         address newStateView = _allowlistedEndpoint(IntegrationRegistry.Endpoint.STATE_VIEW);
         address newHookDeployer = _allowlistedEndpoint(IntegrationRegistry.Endpoint.HOOK_DEPLOYER);
@@ -153,7 +152,6 @@ contract IntegrationRegistryTest is Test {
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.ROUTER, newRouter);
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.PERMIT2, newPermit2);
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.QUOTER, newQuoter);
-        registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.POOL_MANAGER, newPoolManager);
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.POSITION_MANAGER, newPositionManager);
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.STATE_VIEW, newStateView);
         registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.HOOK_DEPLOYER, newHookDeployer);
@@ -161,10 +159,21 @@ contract IntegrationRegistryTest is Test {
         assertEq(registry.router(), newRouter);
         assertEq(registry.permit2(), newPermit2);
         assertEq(registry.quoter(), newQuoter);
-        assertEq(registry.poolManager(), newPoolManager);
+        assertEq(registry.poolManager(), address(poolManager));
         assertEq(registry.positionManager(), newPositionManager);
         assertEq(registry.stateView(), newStateView);
         assertEq(registry.hookDeployer(), newHookDeployer);
+    }
+
+    function testPoolManagerCannotBeAllowlistedOrUpdated() public {
+        emergencyState.setActive(true);
+        address newPoolManager = address(new MockEndpoint());
+
+        vm.expectRevert(IntegrationRegistry.ImmutableEndpoint.selector);
+        registry.setAllowedAddress(IntegrationRegistry.Endpoint.POOL_MANAGER, newPoolManager, true);
+
+        vm.expectRevert(IntegrationRegistry.ImmutableEndpoint.selector);
+        registry.updateIntegrationAddress(IntegrationRegistry.Endpoint.POOL_MANAGER, newPoolManager);
     }
 
     function testSetAllowedAddressCanRemoveAddress() public {

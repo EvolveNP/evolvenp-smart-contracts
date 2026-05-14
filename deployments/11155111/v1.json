@@ -1,0 +1,12 @@
+{
+  "chainId": 11155111,
+  "deployedAt": 1778763864,
+  "deployer": "0xB3FFde53f0076295f2C183f13b4A07dE288Df61D",
+  "emergencyManager": "0x1B8a0aE32ac620d2E9dF6a08e985CbaeBDCCA24f",
+  "factory": "0x2d599b18cB36F7507b8BC6b8Ee60e5a94742E2Ba",
+  "hook": "0x9e5E4917E2cECBf82D70b608bfECe8cEB9AE38Cc",
+  "hookDeployer": "0x5a2EF16FAc09371bB00bF3a4A105BC40eb953C9A",
+  "integrationRegistry": "0x41e951Ee769DcbC2304A8a4De221839507c0dB60",
+  "usdc": "0xd96c5602E7590eC79E9d87fcdcaDa1af36254fA7",
+  "version": 1
+}

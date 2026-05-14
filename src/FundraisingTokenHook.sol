@@ -22,11 +22,10 @@ import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 
 /**
  * @title FundraisingTokenHook
- * @notice Implements Uniswap V4 hooks to enforce launch protection, cooldowns, buy limits, and swap taxation
- *         for a fundraising token.
- * @dev
- * Integrates with the Uniswap V4 PoolManager, applying buy/sell restrictions and tax fees that are routed
- * to a treasury address. Supports launch protection with block and time based holds and per-wallet cooldowns.
+ * @notice Global Uniswap v4 hook for all factory-created fundraising-token/USDC pools.
+ * @dev The hook resolves the fundraising token and target vault from Factory on each callback. It authorizes only
+ * factory-approved pools, records oracle observations, applies launch buy protections, and routes buy/sell tax to
+ * the vault for the specific fundraising token. Tax is skipped while EmergencyManager reports active emergency mode.
  */
 contract FundraisingTokenHook is BaseHook {
     using TruncatedOracle for TruncatedOracle.Observation[65535];
@@ -82,19 +81,11 @@ contract FundraisingTokenHook is BaseHook {
     mapping(bytes32 => ObservationState) public states;
 
     /**
-     * @notice Initializes the FundraisingTokenHook contract with the PoolManager and core protocol addresses.
-     * @dev
-     * This constructor sets up immutable references for critical protocol components:
-     * - The Uniswap V4 `PoolManager` used for managing pool interactions.
-     * - The `fundraisingTokenAddress` for which this hook will apply buy/sell rules and tax logic.
-     * - The `vault`, which receives collected fees from swaps.
-     *
-     * It also records the deployment `launchTimestamp` and `launchBlock`, which are later
-     * used to enforce launch protection (e.g., cooldowns, max buy limits, and block-based restrictions).
-     *
+     * @notice Deploys the global fundraising hook.
      * @param _poolManager The address of the Uniswap V4 PoolManager contract.
-     * @param _factoryAddress The address of the factory that stores protocol->vault relationships.
-     * @param _usdcAddress The address of the shared USDC underlying token.
+     * @param _factoryAddress Factory used to resolve protocol records and authorized pools.
+     * @param _usdcAddress Shared USDC token used by all fundraising pools.
+     * @param _integrationRegistry Registry used to resolve mutable peripheral endpoints.
      */
     constructor(address _poolManager, address _factoryAddress, address _usdcAddress, address _integrationRegistry)
         BaseHook(IPoolManager(_poolManager))
@@ -104,6 +95,13 @@ contract FundraisingTokenHook is BaseHook {
         integrationRegistry = IIntegrationRegistry(_integrationRegistry);
     }
 
+    /**
+     * @notice Returns oracle cumulative values for a pool.
+     * @param key Pool key whose observations are read.
+     * @param secondsAgos Lookback offsets used by the truncated oracle.
+     * @return tickCumulatives Tick cumulative values at the requested lookbacks.
+     * @return secondsPerLiquidityCumulativeX128s Seconds-per-liquidity cumulative values.
+     */
     function observe(PoolKey calldata key, uint32[] calldata secondsAgos)
         external
         view
@@ -120,6 +118,10 @@ contract FundraisingTokenHook is BaseHook {
         return observations[id].observe(_blockTimestamp(), secondsAgos, tick, state.index, liquidity, state.cardinality);
     }
 
+    /**
+     * @notice Returns the current tick for a pool from StateView.
+     * @param key Pool key to inspect.
+     */
     function getCurrentTick(PoolKey calldata key) public view returns (int24) {
         (, int24 tick,,) = IStateView(stateView()).getSlot0(key.toId());
         return tick;
@@ -127,20 +129,7 @@ contract FundraisingTokenHook is BaseHook {
 
     /**
      * @notice Defines the hook permissions required by this contract for Uniswap V4 integration.
-     * @dev
-     * This function specifies which Uniswap V4 hook callbacks are enabled for this contract.
-     * Returning a `Hooks.Permissions` struct allows the PoolManager to know which lifecycle
-     * events (e.g., swaps, liquidity changes) will trigger hook calls.
-     *
-     * In this implementation:
-     * - Only `beforeSwap` and `afterSwap` hooks are enabled, since the contract enforces
-     *   taxation and trading restrictions around swaps.
-     * - Both `beforeSwapReturnDelta` and `afterSwapReturnDelta` are enabled to support
-     *   delta-based balance adjustments for fee deductions and collections.
-     * - All other hooks (liquidity and donation related) are disabled to minimize gas usage
-     *   and avoid unnecessary callback logic.
-     *
-     * @return permissions Struct specifying which Uniswap V4 hook callbacks are active for this contract.
+     * @return permissions Enabled callbacks and return-delta flags required by this hook.
      */
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
@@ -161,10 +150,13 @@ contract FundraisingTokenHook is BaseHook {
         });
     }
 
+    /**
+     * @notice Validates pool initialization before Uniswap creates the pool.
+     * @param key Pool key being initialized.
+     * @return Hook selector expected by PoolManager.
+     * @dev Allows only zero-fee, max tick-spacing, factory-authorized fundraising-token/USDC pools.
+     */
     function _beforeInitialize(address, PoolKey calldata key, uint160) internal virtual override returns (bytes4) {
-        // This is to limit the fragmentation of pools using this oracle hook. In other words,
-        // there may only be one pool per pair of tokens that use this hook. The tick spacing is set to the maximum
-        // because we only allow max range liquidity in this pool.
         if (key.fee != 0 || key.tickSpacing != TickMath.MAX_TICK_SPACING) {
             revert OnlyOneOraclePoolAllowed();
         }
@@ -177,6 +169,12 @@ contract FundraisingTokenHook is BaseHook {
         return BaseHook.beforeInitialize.selector;
     }
 
+    /**
+     * @notice Initializes launch metadata and the oracle observation buffer for a newly created pool.
+     * @param key Pool key that was initialized.
+     * @param tick Initial pool tick.
+     * @return Hook selector expected by PoolManager.
+     */
     function _afterInitialize(address, PoolKey calldata key, uint160, int24 tick)
         internal
         virtual
@@ -195,6 +193,13 @@ contract FundraisingTokenHook is BaseHook {
         return BaseHook.afterInitialize.selector;
     }
 
+    /**
+     * @notice Validates liquidity additions and updates the oracle observation.
+     * @param key Pool receiving liquidity.
+     * @param params Liquidity modification parameters.
+     * @return Hook selector expected by PoolManager.
+     * @dev Only full-range positive liquidity additions are accepted.
+     */
     function _beforeAddLiquidity(address, PoolKey calldata key, ModifyLiquidityParams calldata params, bytes calldata)
         internal
         virtual
@@ -215,37 +220,14 @@ contract FundraisingTokenHook is BaseHook {
 
     /**
      * @notice Hook executed before a swap — applies sell-side tax logic for exact-input sells.
-     * @dev
-     * This function is called by the Uniswap V4 PoolManager **before** executing a swap.
-     * It identifies whether the fundraising token is being **sold** (swapped out of the pool) and,
-     * if so, deducts a protocol-defined fee for exact-input swaps. Exact-output sells are taxed
-     * in `_afterSwap`, where the actual fundraising-token input consumed by the swap is known.
-     *
-     * The function uses `tx.origin` instead of `msg.sender` because Uniswap’s router
-     * contract typically calls the pool on behalf of the end user — `tx.origin`
-     * ensures the actual swap initiator is checked against taxation rules.
-     *
-     * ### Key Behavior:
-     * - Detects **sell transactions** by comparing `zeroForOne` with token ordering.
-     * - Calls `checkIfTaxIncurred` to determine if the tax mechanism is active.
-     * - Calculates and deducts the fee based on `TAX_FEE_PERCENTAGE / TAX_FEE_DENOMINATOR`.
-     * - Transfers the deducted fee to `vault` via `poolManager.take`.
-     * - Returns a `BeforeSwapDelta` reflecting the amount deducted before swap execution.
-     *
+     * @dev Exact-output sells are taxed in `_afterSwap`, where the actual fundraising-token input is known.
+     * The function also writes a fresh oracle observation before returning.
+     * @param sender PoolManager-provided swap sender.
      * @param key The Uniswap V4 pool key containing currencies, fee tier, and hook configuration.
      * @param params Swap parameters indicating direction, amount, and bounds.
-     * @param (unused) Extra calldata (kept for hook interface compatibility).
-     *
      * @return selector Always returns `BaseHook.beforeSwap.selector` to signal successful execution.
-     * @return returnDelta Struct specifying the deducted fee amount before swap execution.
-     * @return fee Additional Uniswap fee parameter (always 0; taxation handled via delta).
-     *
-     * @custom:reverts FeeToLarge If the computed fee exceeds the int128 limit (for Uniswap deltas).
-     * @custom:security
-     * - Uses `tx.origin` to reference the actual user rather than the router contract.
-     * - Ensures only valid sell transactions trigger taxation.
-     * - Fee flows directly to `vault`, which must be trusted and controlled by governance.
-     * - Prevents overflow in signed integer conversions.
+     * @return returnDelta Before-swap delta charging exact-input sell tax in the specified currency.
+     * @return fee Additional LP fee override, always zero.
      */
     function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata)
         internal
@@ -281,32 +263,14 @@ contract FundraisingTokenHook is BaseHook {
 
     /**
      * @notice Hook executed after a swap — enforces buy restrictions and collects applicable swap fees.
-     * @dev This hook:
-     *      - Determines whether the swap represents a buy or an exact-output sell of the fundraising token.
-     *      - Enforces launch protection, per-wallet cooldowns, and max-buy limits using `isTransferBlocked`.
-     *      - Records the buyer’s last purchase timestamp during the launch hold period.
-     *      - Optionally applies a buy tax or exact-output sell tax via `checkIfTaxIncurred`
-     *        and sends the fee to the treasury wallet.
-     *
-     *      ⚠️ `tx.origin` is intentionally used here instead of `msg.sender` or Uniswap’s router-provided `sender`,
-     *      because Uniswap v4 passes the **router contract address** as the swap initiator. Using `tx.origin`
-     *      correctly identifies the **end user** who triggered the transaction, ensuring cooldowns, max buy limits,
-     *      and tax logic apply per wallet rather than per router.
-     *
-     * @param (unused) Unused address parameter kept for compatibility with Uniswap’s hook interface.
+     * @param sender PoolManager-provided swap sender.
      * @param key Pool key containing currencies, fee tier, tick spacing, and hooks.
      * @param params Swap parameters defining direction and amount deltas.
      * @param delta Balance delta object representing the change in token balances for this swap.
-     * @param (unused) Unused extra calldata for future compatibility.
-     *
      * @return selector Always returns `BaseHook.afterSwap.selector` to indicate successful hook execution.
-     * @return feeDelta Signed 128-bit integer representing the collected fee (positive if fee was taken).
-     *
-     * @custom:reverts FeeToLarge If the computed fee exceeds the 127-bit signed integer limit.
-     * @custom:security
-     *      - Relies on `tx.origin` to identify users; ensure this is acceptable in this model.
-     *      - Transfers the buy fee directly to `vault` using `poolManager.take`.
-     *      - `vault`, `fundraisingTokenAddress`, and `poolManager` are trusted and immutable.
+     * @return feeDelta Hook delta for collected buy or exact-output sell tax.
+     * @dev Buy tax is based on actual fundraising-token output. Exact-output sell tax is based on actual
+     * fundraising-token input consumed by the swap.
      */
     function _afterSwap(
         address sender,
@@ -361,19 +325,11 @@ contract FundraisingTokenHook is BaseHook {
 
     /**
      * @notice Checks whether a token transfer should be blocked due to launch protection, cooldowns, or buy limits.
-     * @dev This function reverts (does not return a value) if any restriction is violated.
-     *      Restrictions include:
-     *      - Transfers are blocked before `launchBlock + blocksToHold`.
-     *      - During the `timeToHold` period after launch, each wallet:
-     *          - Cannot buy more than `maxBuySize` (expressed as a fraction of total supply, scaled by 1e18).
-     *          - Must respect a cooldown between consecutive purchases (`perWalletCoolDownPeriod`).
-     *
+     * @param fundraisingTokenAddress Fundraising token being bought.
      * @param _account The address of the account attempting the transfer.
-     * @param _amount The amount being transferred (signed integer to support buy/sell logic).
-     *
-     * @custom:reverts BlockToHoldNotPassed If the current block number is within the launch protection period.
-     * @custom:reverts AmountGreaterThanMaxBuyAmount If `_amount` exceeds the allowed max buy size during the hold period.
-     * @custom:reverts CoolDownPeriodNotPassed If the wallet tries to transfer again before its cooldown period has elapsed.
+     * @param _amount Fundraising token amount received by the account.
+     * @dev Reverts while block-based protection is active, when amount exceeds max-buy size during the hold window,
+     * or when the account is still inside its cooldown period.
      */
     function isTransferBlocked(address fundraisingTokenAddress, address _account, int256 _amount) internal view {
         // Block transfers during launch protection (by block count)
@@ -398,11 +354,9 @@ contract FundraisingTokenHook is BaseHook {
     }
 
     /**
-     * @notice Calculates the treasury's token holdings as a percentage of the total token supply.
-     * @dev The result is scaled by 1e18 for precision (e.g., 1e16 represents 1%).
-     *      Returns 0 if the total supply is zero to avoid division by zero.
-     *
-     * @return percentage The treasury’s balance as a percentage of the total token supply, scaled by 1e18.
+     * @notice Calculates the vault's fundraising token balance as a percentage of total supply.
+     * @param key Pool key used to resolve the fundraising token and vault.
+     * @return percentage Vault balance percentage scaled by 1e18.
      */
     function getTreasuryBalanceInPerecent(PoolKey calldata key) internal view returns (uint256) {
         (address fundraisingTokenAddress, address vault) = _getFundraisingContext(key);
@@ -413,14 +367,10 @@ contract FundraisingTokenHook is BaseHook {
     }
 
     /**
-     * @notice Determines whether a transaction should incur a tax based on treasury and sender conditions.
-     * @dev Tax is applied only if:
-     *      - The treasury is not paused,
-     *      - The treasury balance is below the maximum threshold,
-     *      - The sender is neither the treasury registry address nor the donation registry address.
-     *
+     * @notice Determines whether a swap should route tax to the protocol vault.
+     * @param key Pool key used to resolve protocol context.
      * @param sender The address initiating the transaction.
-     * @return bool Returns `true` if tax should be incurred, otherwise `false`.
+     * @return True when emergency is inactive, the vault balance is below threshold, and sender is not the vault.
      */
     function checkIfTaxIncurred(PoolKey calldata key, address sender) internal view returns (bool) {
         (, address vault) = _getFundraisingContext(key);
@@ -430,6 +380,11 @@ contract FundraisingTokenHook is BaseHook {
         return (getTreasuryBalanceInPerecent(key) < maximumThreshold) && sender != vault;
     }
 
+    /**
+     * @notice Resolves the effective user address for router and quoter initiated swaps.
+     * @param sender PoolManager-provided sender.
+     * @return Effective account used for tax and launch-protection checks.
+     */
     function getMsgSender(address sender) internal view returns (address) {
         if (sender == quoter()) {
             return IMsgSender(sender).msgSender();
@@ -443,7 +398,10 @@ contract FundraisingTokenHook is BaseHook {
         return tx.origin;
     }
 
-    /// @dev Called before any action that potentially modifies pool price or liquidity, such as swap or modify position
+    /**
+     * @notice Writes a new oracle observation for the pool.
+     * @param key Pool key whose current tick and liquidity are sampled.
+     */
     function _updatePool(PoolKey calldata key) private {
         bytes32 id = PoolId.unwrap(key.toId());
 
@@ -456,22 +414,41 @@ contract FundraisingTokenHook is BaseHook {
         );
     }
 
+    /**
+     * @notice Returns the current block timestamp truncated to 32 bits for oracle storage.
+     */
     function _blockTimestamp() internal view virtual returns (uint32) {
         return uint32(block.timestamp);
     }
 
+    /**
+     * @notice Returns the current router endpoint from IntegrationRegistry.
+     */
     function router() public view returns (address) {
         return integrationRegistry.router();
     }
 
+    /**
+     * @notice Returns the current quoter endpoint from IntegrationRegistry.
+     */
     function quoter() public view returns (address) {
         return integrationRegistry.quoter();
     }
 
+    /**
+     * @notice Returns the current StateView endpoint from IntegrationRegistry.
+     */
     function stateView() public view returns (address) {
         return integrationRegistry.stateView();
     }
 
+    /**
+     * @notice Resolves fundraising token and vault for a pool key.
+     * @param key Pool key expected to contain USDC and a factory-created fundraising token.
+     * @return fundraisingTokenAddress Fundraising token identified from the pool pair.
+     * @return vault Vault that receives tax for the fundraising token.
+     * @dev Reverts unless the pool is USDC paired, registered in Factory, and authorized for this hook.
+     */
     function _getFundraisingContext(PoolKey calldata key)
         internal
         view

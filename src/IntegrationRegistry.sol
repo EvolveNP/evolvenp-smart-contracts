@@ -5,6 +5,12 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 import {IHookDeployer} from "./interfaces/IHookDeployer.sol";
 
+/**
+ * @title IntegrationRegistry
+ * @notice Stores protocol integration endpoints and owns deployment of the shared fundraising hook.
+ * @dev Mutable endpoint updates are allowed only during active emergency mode and only to previously allowed
+ * contract addresses. PoolManager is immutable because live pools and the shared hook are bound to it.
+ */
 contract IntegrationRegistry is Ownable {
     enum Endpoint {
         ROUTER,
@@ -40,11 +46,26 @@ contract IntegrationRegistry is Ownable {
     event IntegrationUpdated(Endpoint endpointType, address oldAddress, address newAddress);
     event HookDeployed(address hookAddress);
 
+    /**
+     * @notice Reverts when an address argument is zero.
+     * @param _address Address to validate.
+     */
     modifier nonZeroAddress(address _address) {
         if (_address == address(0)) revert ZeroAddress();
         _;
     }
 
+    /**
+     * @notice Deploys the registry with its initial integration endpoints.
+     * @param _router Uniswap Universal Router endpoint.
+     * @param _permit2 Permit2 endpoint.
+     * @param _quoter Uniswap v4 quoter endpoint.
+     * @param _poolManager Immutable Uniswap v4 PoolManager endpoint.
+     * @param _positionManager Uniswap v4 position manager endpoint.
+     * @param _stateView Uniswap v4 state view endpoint.
+     * @param _hookDeployer HookDeployer used by this registry to deploy the shared hook.
+     * @param _emergencyManager EmergencyManager that gates endpoint updates.
+     */
     constructor(
         address _router,
         address _permit2,
@@ -75,6 +96,12 @@ contract IntegrationRegistry is Ownable {
         emergencyManager = _emergencyManager;
     }
 
+    /**
+     * @notice Updates a mutable integration endpoint during active emergency mode.
+     * @param endpoint Endpoint type to update.
+     * @param newAddress Replacement contract address. It must already be allowlisted for the endpoint.
+     * @dev Reverts for POOL_MANAGER because it is immutable for a deployed protocol instance.
+     */
     function updateIntegrationAddress(Endpoint endpoint, address newAddress)
         external
         onlyOwner
@@ -107,6 +134,13 @@ contract IntegrationRegistry is Ownable {
         emit IntegrationUpdated(endpoint, currentAddress, newAddress);
     }
 
+    /**
+     * @notice Adds or removes an allowed replacement address for an endpoint during active emergency mode.
+     * @param endpoint Endpoint type whose allowlist is changed.
+     * @param newAddress Contract address to allow or remove.
+     * @param allowed Whether the address should be allowed.
+     * @dev The address must contain code. POOL_MANAGER cannot be allowlisted because it cannot be updated.
+     */
     function setAllowedAddress(Endpoint endpoint, address newAddress, bool allowed) external onlyOwner {
         if (endpoint == Endpoint.POOL_MANAGER) revert ImmutableEndpoint();
         if (newAddress.code.length == 0) revert NoCodeAtAddress();
@@ -115,6 +149,12 @@ contract IntegrationRegistry is Ownable {
         emit AllowListConfigured(endpoint, newAddress, allowed);
     }
 
+    /**
+     * @notice Deploys the global fundraising hook once through the configured HookDeployer.
+     * @param salt CREATE2 salt that produces a hook address with the required Uniswap v4 hook flags.
+     * @return deployedHook The deployed shared hook address.
+     * @dev Callable only by the registry owner. The stored hook cannot be replaced.
+     */
     function deployHook(bytes32 salt) external onlyOwner returns (address deployedHook) {
         if (hookAddress != address(0)) revert HookAlreadyDeployed();
         try IHookDeployer(hookDeployer).deployHook(salt) returns (address hook) {

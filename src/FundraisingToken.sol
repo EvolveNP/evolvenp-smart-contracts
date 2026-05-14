@@ -5,9 +5,9 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /**
  * @title FundraisingToken
- * @notice ERC20 Fundraising token.
- *         Initial supply is minted to the liquidity pool manager and treasury wallet.
- * @dev Tokens can be burned only by the treasury wallet to reduce supply.
+ * @notice ERC20 issued for a fundraising protocol.
+ * @dev The constructor mints 75% of supply to the factory for initial liquidity and 25% to the protocol vault.
+ * The token has no privileged mint, burn, pause, or admin mutation after deployment.
  */
 contract FundraisingToken is ERC20 {
     /**
@@ -18,15 +18,12 @@ contract FundraisingToken is ERC20 {
     error OnlyTreasury();
     error SameAddress();
 
-    /**
-     * State Variables
-     */
-    address public immutable factoryAddress; // The address of the liquidity pool manager
-    address public immutable vault; //The address of the treasury wallet
+    address public immutable factoryAddress; // Factory that receives the LP-side token allocation.
+    address public immutable vault; // Vault that receives the protocol-side token allocation.
     uint8 _decimals;
 
     /**
-     * @notice Modifier to ensure the address is not zero.
+     * @notice Reverts when an address argument is zero.
      * @param _address The address to validate.
      */
     modifier nonZeroAddress(address _address) {
@@ -35,7 +32,7 @@ contract FundraisingToken is ERC20 {
     }
 
     /**
-     * @notice Modifier to ensure the amount is not zero.
+     * @notice Reverts when an amount argument is zero.
      * @param _amount The amount to validate.
      */
     modifier nonZeroAmount(uint256 _amount) {
@@ -44,14 +41,14 @@ contract FundraisingToken is ERC20 {
     }
 
     /**
-     * @notice Constructs the FundRaisingToken contract.
-     * @param name The name of the token.
-     * @param symbol The symbol of the token.
+     * @notice Deploys a fundraising token and mints the initial supply.
+     * @param name Token name.
+     * @param symbol Token symbol.
      * @param decimals_ Number of decimals the token uses.
-     * @param _factoryAddress The address of the factory.
-     * @param _vault The address of the vault.
-     * @param _totalSupply The total supply of tokens to mint initially.
-     * @dev Mints 75% of total supply to the liquidity pool manager and 25% to the treasury wallet.
+     * @param _factoryAddress Factory address that receives 75% of supply for pool creation.
+     * @param _vault Vault address that receives 25% of supply for scheduled fundraising execution.
+     * @param _totalSupply Total token supply to mint at deployment.
+     * @dev Reverts if either recipient is zero, both recipients are equal, or total supply is zero.
      */
     constructor(
         string memory name,
@@ -74,7 +71,7 @@ contract FundraisingToken is ERC20 {
 
     /**
      * @notice Returns the number of decimals used by the token.
-     * @return The decimals of the token.
+     * @return Number of decimals configured at deployment.
      */
     function decimals() public view virtual override returns (uint8) {
         return _decimals;

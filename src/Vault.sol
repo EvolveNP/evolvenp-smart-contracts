@@ -10,6 +10,13 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IHook} from "./interfaces/IHook.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 
+/**
+ * @title Vault
+ * @notice Holds protocol token allocations and periodically sells fundraising tokens for USDC beneficiaries.
+ * @dev The factory configures the fundraising token and shared hook after deployment. Monthly execution checks
+ * emergency state, timing, token balance, pool configuration, and hook oracle safety before swapping a configured
+ * percentage of fundraising tokens to USDC and splitting proceeds across beneficiaries.
+ */
 contract Vault is Swap {
     using SafeERC20 for IERC20;
     /**
@@ -49,24 +56,45 @@ contract Vault is Swap {
     int24 public constant maxTickDeviation = 198; // Maximum tick deviation for swaps 2%
 
     /**
-     * @notice This event is used to log successful transfers to non-profit organizations.
-     * @param recipient The address of the non-profit receiving funds.
-     * @param amount The amount of funds transferred.
-     * @dev Emitted when funds are transferred to a non-profit recipient.
+     * @notice Emitted when USDC proceeds are sent to a beneficiary.
+     * @param recipient Beneficiary receiving funds.
+     * @param amount USDC amount transferred.
      */
     event FundsTransferredToNonProfit(address recipient, uint256 amount);
+
+    /**
+     * @notice Emitted when monthly execution records a recoverable integration failure and exits without reverting.
+     * @param reason Selector identifying the failed step.
+     */
     event MonthlyExecutionFailed(bytes4 reason);
 
+    /**
+     * @notice Restricts configuration functions to the factory that deployed the vault.
+     */
     modifier onlyFactory() {
         if (msg.sender != factoryAddress) revert NotFactory();
         _;
     }
 
+    /**
+     * @notice Restricts helper functions to external self-calls used for try/catch failure recording.
+     */
     modifier onlySelf() {
         if (msg.sender != address(this)) revert OnlySelf();
         _;
     }
 
+    /**
+     * @notice Deploys a vault for one fundraising protocol.
+     * @param _underlyingAsset USDC token distributed to beneficiaries.
+     * @param _intervalSeconds Minimum delay between successful monthly executions.
+     * @param _beneficiaries Recipients of swapped USDC proceeds.
+     * @param _swapPercentage Percentage of fundraising token balance to swap per execution, scaled by 1e18.
+     * @param _integrationRegistry Registry used by the inherited swap helper.
+     * @param _emergencyManager EmergencyManager used to block execution and record failures.
+     * @param _minTokenBalanceToExecute Minimum fundraising token balance required before execution.
+     * @param _factoryAddress Factory allowed to configure the fundraising token and hook.
+     */
     constructor(
         address _underlyingAsset,
         uint256 _intervalSeconds,
@@ -95,6 +123,11 @@ contract Vault is Swap {
         lastSuccessAt = block.timestamp;
     }
 
+    /**
+     * @notice Executes the scheduled fundraising-token sale and USDC beneficiary distribution.
+     * @dev Reverts for hard precondition failures. Quote, swap, and state-view failures are recorded in
+     * EmergencyManager and emitted as `MonthlyExecutionFailed` without reverting so counters persist.
+     */
     function executeMonthlyEvent() external {
         IEmergencyManager manager = IEmergencyManager(emergencyManager);
 
@@ -138,6 +171,10 @@ contract Vault is Swap {
         _finalizeSuccessfulExecution(amountOut);
     }
 
+    /**
+     * @notice Returns whether this vault currently satisfies the basic execution conditions.
+     * @dev Checks time, emergency state, and fundraising token balance. Pool and oracle safety are checked in execution.
+     */
     function isDue() external view returns (bool) {
         if (
             block.timestamp >= lastSuccessAt + intervalSeconds
@@ -148,19 +185,23 @@ contract Vault is Swap {
     }
 
     /**
-     * @notice Swaps all fundraising tokens held by the contract to underlying currency and transfers the proceeds to the non-profit organization wallet.
-     * @dev This function is intended to be called by Chainlink Automation (Keepers).
-     *      It determines the correct pool, calculates minimum expected output, performs the swap,
-     *      and then transfers the swapped funds (ETH or ERC20) to the owner's address.
-     *      Reverts if the token transfer or ETH transfer fails.
-     *
-     * Emits a {FundsTransferredToNonProfit} event indicating the owner and amount transferred.
+     * @notice Quotes the fundraising-token to USDC swap and applies slippage tolerance.
+     * @param amountIn Fundraising token amount to quote.
+     * @return minAmountOut Minimum acceptable USDC output after slippage.
+     * @dev External self-call target so `executeMonthlyEvent` can catch quote failures.
      */
     function quoteFundraisingTokenSwap(uint128 amountIn) external onlySelf returns (uint256 minAmountOut) {
         (PoolKey memory key, bool isCurrency0FundraisingToken) = _getPoolKey();
         minAmountOut = getMinAmountOut(key, isCurrency0FundraisingToken, amountIn, bytes(""));
     }
 
+    /**
+     * @notice Swaps fundraising tokens held by the vault for USDC.
+     * @param amountIn Fundraising token amount to sell.
+     * @param minAmountOut Minimum acceptable USDC output.
+     * @return amountOut Actual USDC received by the vault.
+     * @dev External self-call target so `executeMonthlyEvent` can catch swap failures.
+     */
     function swapFundraisingToken(uint128 amountIn, uint128 minAmountOut)
         external
         onlySelf
@@ -170,16 +211,29 @@ contract Vault is Swap {
         amountOut = swapExactInputSingle(key, amountIn, minAmountOut, isCurrency0FundraisingToken);
     }
 
+    /**
+     * @notice Calculates the fundraising token amount to sell this execution.
+     * @return amountIn Token amount based on current vault balance and configured percentage.
+     */
     function _getSwapAmountIn() internal view returns (uint256 amountIn) {
         uint256 tokenBalance = IERC20(fundraisingToken).balanceOf(address(this));
         amountIn = (tokenBalance * swapPercentage) / 1e18;
         if (amountIn == 0) revert ZeroSwapAmount();
     }
 
+    /**
+     * @notice External self-call wrapper around `shouldAllowSell`.
+     * @return True if the hook oracle price check allows the vault to sell.
+     */
     function checkShouldAllowSell() external view onlySelf returns (bool) {
         return shouldAllowSell();
     }
 
+    /**
+     * @notice Checks whether the current pool price is within the allowed TWAP deviation.
+     * @return True when the current tick is not too far from the 30-minute average tick.
+     * @dev Uses the shared hook oracle observations for the canonical fundraising-token/USDC pool.
+     */
     function shouldAllowSell() public view returns (bool) {
         if (hookAddress == address(0)) revert HookNotConfigured();
         IHook hook = IHook(hookAddress);
@@ -203,6 +257,11 @@ contract Vault is Swap {
         return currentTick - avgTick <= maxTickDeviation;
     }
 
+    /**
+     * @notice Splits received USDC proceeds across configured beneficiaries.
+     * @param amountOut Total USDC amount received by the vault.
+     * @dev Remainder dust is added to the last beneficiary.
+     */
     function _distributeProceeds(uint256 amountOut) internal {
         uint256 beneficiaryCount = beneficiaries.length;
         if (beneficiaryCount == 0) revert NoBeneficiaries();
@@ -222,23 +281,44 @@ contract Vault is Swap {
         }
     }
 
+    /**
+     * @notice Sets the shared hook address after successful pool creation.
+     * @param _hookAddress Hook address stored in IntegrationRegistry and used by the canonical pool.
+     */
     function setHookAddress(address _hookAddress) external onlyFactory {
         hookAddress = _hookAddress;
     }
 
+    /**
+     * @notice Sets the fundraising token controlled by this vault.
+     * @param _fundraisingToken Fundraising token deployed by the factory.
+     */
     function setFundraisingToken(address _fundraisingToken) external onlyFactory {
         fundraisingToken = _fundraisingToken;
     }
 
+    /**
+     * @notice Best-effort endpoint failure report for state-view / hook oracle failures.
+     * @param manager EmergencyManager receiving the failure report.
+     */
     function _tryRecordEndpointFailure(IEmergencyManager manager) internal {
         try manager.recordEndpointFailure(uint8(IIntegrationRegistry.Endpoint.STATE_VIEW)) {} catch {}
     }
 
+    /**
+     * @notice Completes successful execution by distributing proceeds and updating `lastSuccessAt`.
+     * @param amountOut USDC amount received from the swap.
+     */
     function _finalizeSuccessfulExecution(uint256 amountOut) internal {
         _distributeProceeds(amountOut);
         lastSuccessAt = block.timestamp;
     }
 
+    /**
+     * @notice Validates the beneficiary list used for USDC distributions.
+     * @param _beneficiaries Beneficiary list supplied at deployment.
+     * @dev Rejects empty lists, zero addresses, and duplicates.
+     */
     function _validateBeneficiaries(address[] memory _beneficiaries) internal pure {
         uint256 beneficiaryCount = _beneficiaries.length;
         if (beneficiaryCount == 0) revert NoBeneficiaries();
@@ -253,6 +333,11 @@ contract Vault is Swap {
         }
     }
 
+    /**
+     * @notice Loads and validates the canonical pool key for this vault's fundraising token.
+     * @return key Pool key stored in the factory.
+     * @return isCurrency0FundraisingToken True when the fundraising token is currency0 in the pool.
+     */
     function _getPoolKey() internal view returns (PoolKey memory key, bool isCurrency0FundraisingToken) {
         key = IFactory(factoryAddress).getPoolKeys(fundraisingToken);
         bool isCurrency0 = Currency.unwrap(key.currency0) == fundraisingToken;

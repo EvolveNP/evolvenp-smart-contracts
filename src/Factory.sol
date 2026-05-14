@@ -21,6 +21,13 @@ import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmo
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+/**
+ * @title Factory
+ * @notice Creates USDC-backed fundraising vaults and their canonical Uniswap v4 pools.
+ * @dev Protocol records are keyed by fundraising token address. The factory deploys each vault/token pair,
+ * registers the vault as an emergency reporter, holds the LP-side token allocation, and later initializes
+ * the single authorized fundraising-token/USDC pool using the global hook stored in IntegrationRegistry.
+ */
 contract Factory is IFactory, Ownable {
     using PoolIdLibrary for PoolKey;
     using SafeERC20 for IERC20Metadata;
@@ -38,41 +45,41 @@ contract Factory is IFactory, Ownable {
     address public immutable emergencyManagerAddress;
     address public immutable usdcAddress;
 
-    /**
-     * @notice Mapping storing fundraising protocol details by non-profit owner address.
-     * @dev Contains fundraising token, wallets, hook, owner, and LP creation state.
-     */
+    /// @notice Fundraising protocol metadata keyed by fundraising token address.
     mapping(address => FundraisingProtocol) internal protocols;
-    /**
-     * @notice Mapping storing Uniswap pool keys by fundraising token address.
-     * @dev Used to quickly access pool details for a given fundraising token.
-     */
+
+    /// @notice Canonical Uniswap v4 pool key keyed by fundraising token address.
     mapping(address => PoolKey) public poolKeys;
+
+    /// @notice Temporary pool id authorization used only during factory-driven pool initialization.
     mapping(address => bytes32) internal pendingHookPoolIds;
 
     /**
-     *  @notice Emitted when a new fundraising vault is created.
-     * @dev Contains the fundraising token, treasury wallet, donation wallet, and owner addresses.
+     * @notice Emitted when a fundraising token and vault are deployed.
      * @param fundraisingToken The address of the fundraising token.
-     * @param vault The address of the vault.
+     * @param vault The address of the vault for that fundraising token.
      */
     event FundraisingVaultCreated(address fundraisingToken, address vault);
 
     /**
-     *  @notice Emitted when a new liquidity pool is created.
-     * @dev Contains the currency addresses and owner.
-     * @param currency0 The address of the first currency.
-     * @param currency1 The address of the second currency.
-     * @param owner The address of the owner.
+     * @notice Emitted when a fundraising-token/USDC pool is successfully initialized and funded.
+     * @param currency0 The first currency in the sorted pool key.
+     * @param currency1 The second currency in the sorted pool key.
+     * @param owner The fundraising token used as the protocol key.
      */
     event LiquidityPoolCreated(address currency0, address currency1, address owner);
+
+    /**
+     * @notice Emitted when pool creation fails after assets have been pulled in.
+     * @param fundraisingToken The fundraising token whose pool creation failed.
+     * @param reason Selector describing the failed internal operation.
+     * @param endpoint Integration endpoint attributed to the failure.
+     */
     event PoolCreationFailed(address fundraisingToken, bytes4 reason, IIntegrationRegistry.Endpoint endpoint);
 
     /**
-     * @notice Ensures that the provided address is not the zero address.
-     * @dev Reverts with `ZeroAddress()` if `_address` is the zero address.
+     * @notice Reverts when an address argument is zero.
      * @param _address The address to validate.
-     * @custom:netmod This modifier should be used to prevent zero address assignments in contract logic.
      */
     modifier nonZeroAddress(address _address) {
         if (_address == address(0)) revert ZeroAddress();
@@ -80,21 +87,28 @@ contract Factory is IFactory, Ownable {
     }
 
     /**
-     * @notice Ensures that the provided amount is not zero.
-     * @dev Reverts with ZeroAmount() if `_amount` is zero.
+     * @notice Reverts when an amount argument is zero.
      * @param _amount The amount to check for non-zero value.
-     * @custom:netmod Guarantees that the function using this modifier will not execute with a zero amount.
      */
     modifier nonZeroAmount(uint256 _amount) {
         if (_amount == 0) revert ZeroAmount();
         _;
     }
 
+    /**
+     * @notice Restricts an external helper to calls made by this factory itself.
+     */
     modifier onlySelf() {
         if (msg.sender != address(this)) revert OnlySelf();
         _;
     }
 
+    /**
+     * @notice Deploys the factory.
+     * @param _registryAddress IntegrationRegistry used for Uniswap endpoint lookup.
+     * @param _emergencyManagerAddress EmergencyManager used for reporter registration and endpoint failure reports.
+     * @param _usdcAddress The only supported underlying asset for fundraising pools.
+     */
     constructor(address _registryAddress, address _emergencyManagerAddress, address _usdcAddress)
         Ownable(msg.sender)
         nonZeroAddress(_registryAddress)
@@ -106,6 +120,19 @@ contract Factory is IFactory, Ownable {
         usdcAddress = _usdcAddress;
     }
 
+    /**
+     * @notice Creates a fundraising vault and ERC20 fundraising token backed by USDC.
+     * @param _tokenName Name for the fundraising token.
+     * @param _tokenSymbol Symbol for the fundraising token.
+     * @param _underlyingAddress Must equal the factory's configured USDC address.
+     * @param _beneficiaries Addresses that receive monthly USDC proceeds from the vault.
+     * @param _intervalSeconds Minimum delay between successful vault executions.
+     * @param _swapPercentage Percentage of vault-held fundraising tokens to sell per execution, scaled by 1e18.
+     * @param _minTokenBalanceToExecute Minimum fundraising token balance required before execution.
+     * @param _totalSupply Whole-token supply before applying the USDC decimals.
+     * @dev The vault validates beneficiary inputs. The factory receives 75% of token supply for LP creation,
+     * and the vault receives 25%. The newly created vault is registered as an emergency reporter.
+     */
     function createFundraisingVault(
         string calldata _tokenName,
         string calldata _tokenSymbol,
@@ -154,32 +181,13 @@ contract Factory is IFactory, Ownable {
     }
 
     /**
-     * @notice Creates a Uniswap V4 liquidity pool for a fundraising token and an underlying asset.
-     * @dev Only callable by the factory contract owner.
-     *      - Handles ERC20 or native asset transfers, pool initialization, liquidity provisioning,
-     *        and deployment of a custom hook for swap-based donation processing.
-     *      - Requires that the fundraising protocol is already registered for `_owner`.
-     *      - Reverts if the fundraising vault or treasury wallet is missing,
-     *        or if a liquidity pool for the owner has already been created.
-     *      - The `_sqrtPriceX96` value is derived using Uniswap's Q96 price encoding formula
-     *        via `encodeSqrtPriceX96(amount1, amount0)`.
-     *
+     * @notice Creates and funds the canonical Uniswap v4 pool for a fundraising token.
      * @param _fundraisingToken The fundraising token address used as the protocol key.
-     * @param _amount0 The liquidity amount for token0 (can be native ETH if `address(0)` is underlying).
-     * @param _amount1 The liquidity amount for token1 (fundraising token).
-     * @custom:security Caller must ensure:
-     *                  - ERC20 approvals are granted to this contract for both tokens.
-     *                  - Sufficient balances are available.
-     *                  - A valid shared hook has already been deployed and registered in IntegrationRegistry.
-     *
-     * @custom:effects
-     *      - Transfers liquidity assets into the contract.
-     *      - Initializes the pool and mints initial liquidity.
-     *      - Marks protocol as LP-created and stores hook and pool metadata.
-     *
-     * @custom:event Emits {LiquidityPoolCreated} with underlying token, fundraising token, and owner.
+     * @param _amount0 USDC amount to provide before token sorting.
+     * @param _amount1 Fundraising token amount to provide before token sorting.
+     * @dev Uses the single global hook stored in IntegrationRegistry. Permit2 or position manager failures are
+     * recorded in EmergencyManager, the pulled USDC is refunded, and the protocol remains uncreated.
      */
-
     function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1)
         external
         nonZeroAddress(_fundraisingToken)
@@ -285,14 +293,30 @@ contract Factory is IFactory, Ownable {
         emit LiquidityPoolCreated(_protocol.underlyingAddress, _protocol.fundraisingToken, _fundraisingToken);
     }
 
+    /**
+     * @notice Returns the protocol record for a fundraising token.
+     * @param _owner Historical parameter name; this value is interpreted as the fundraising token address.
+     */
     function getProtocol(address _owner) external view returns (FundraisingProtocol memory) {
         return protocols[_owner];
     }
 
+    /**
+     * @notice Returns the canonical pool key for a fundraising token.
+     * @param _fundraisingTokenAddress Fundraising token used as the protocol key.
+     */
     function getPoolKeys(address _fundraisingTokenAddress) external view returns (PoolKey memory) {
         return poolKeys[_fundraisingTokenAddress];
     }
 
+    /**
+     * @notice Returns whether a hook may act for a pool/fundraising-token pair.
+     * @param fundraisingToken Fundraising token whose pool is being checked.
+     * @param key Pool key supplied by the hook callback.
+     * @param hookAddress Hook address supplied by the hook for self-verification.
+     * @dev During pool creation, the pending pool id is accepted. After creation, only the stored canonical pool
+     * and stored hook are accepted.
+     */
     function isAuthorizedHookPool(address fundraisingToken, PoolKey calldata key, address hookAddress)
         external
         view
@@ -313,14 +337,12 @@ contract Factory is IFactory, Ownable {
     }
 
     /**
-     * @notice Generates the parameters for adding initial liquidity to a Uniswap V4 pool.
-     * @dev Prepares the actions and parameters required for the IPositionManager.modifyLiquidities call.
+     * @notice Encodes the PositionManager call data for adding full-range initial liquidity.
      * @param key The PoolKey struct representing the pool.
      * @param _amount0 The amount of currency0 to add as liquidity.
      * @param _amount1 The amount of currency1 to add as liquidity.
      * @param _startingPrice The initial sqrtPriceX96 for the pool.
-     * @return Encoded bytes for the modifyLiquidities multicall.
-     * @custom:netspec Returns encoded parameters for IPositionManager.modifyLiquidities to add initial liquidity to the pool.
+     * @return Encoded `modifyLiquidities` call for the position manager multicall.
      */
     function getModifyLiqiuidityParams(PoolKey memory key, uint256 _amount0, uint256 _amount1, uint160 _startingPrice)
         internal
@@ -353,14 +375,32 @@ contract Factory is IFactory, Ownable {
             abi.encodeWithSelector(IPositionManager.modifyLiquidities.selector, abi.encode(actions, params), deadline);
     }
 
+    /**
+     * @notice Calls the Uniswap position manager multicall.
+     * @param positionManager Position manager endpoint read from IntegrationRegistry.
+     * @param params Multicall payload containing pool initialization and liquidity minting.
+     * @dev This function is external so `createPool` can use try/catch while still restricting access to self-calls.
+     */
     function positionManagerMulticall(address positionManager, bytes[] calldata params) external onlySelf {
         IPositionManager(positionManager).multicall(params);
     }
 
+    /**
+     * @notice Best-effort report of an endpoint failure to EmergencyManager.
+     * @param endpoint Integration endpoint associated with the failed pool creation step.
+     */
     function _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint endpoint) internal {
         try IEmergencyManager(emergencyManagerAddress).recordEndpointFailure(uint8(endpoint)) {} catch {}
     }
 
+    /**
+     * @notice Handles non-reverting pool creation failures.
+     * @param fundraisingToken Fundraising token whose pool creation failed.
+     * @param underlying USDC token used for refunding pulled liquidity.
+     * @param refundAmount USDC amount to refund to the caller.
+     * @param reason Selector describing the failure reason.
+     * @param endpoint Integration endpoint attributed to the failure.
+     */
     function _handlePoolCreationFailure(
         address fundraisingToken,
         address underlying,

@@ -71,22 +71,44 @@ contract MockHookRegistry {
     address public hookDeployer;
     address public emergencyManager;
 
-    constructor(address router_, address quoter_, address stateView_) {
+    constructor(address router_, address quoter_, address stateView_, address emergencyManager_) {
         router = router_;
         quoter = quoter_;
         stateView = stateView_;
+        emergencyManager = emergencyManager_;
+    }
+}
+
+contract MockHookEmergencyManager {
+    bool internal active;
+
+    function setEmergencyActive(bool active_) external {
+        active = active_;
+    }
+
+    function isEmergencyActive() external view returns (bool) {
+        return active;
     }
 }
 
 contract MockHookFactory {
     mapping(address => IFactory.FundraisingProtocol) internal protocols;
+    bool internal authorized = true;
 
     function setProtocol(IFactory.FundraisingProtocol memory protocol) external {
         protocols[protocol.fundraisingToken] = protocol;
     }
 
+    function setAuthorized(bool authorized_) external {
+        authorized = authorized_;
+    }
+
     function getProtocol(address fundraisingToken) external view returns (IFactory.FundraisingProtocol memory) {
         return protocols[fundraisingToken];
+    }
+
+    function isAuthorizedHookPool(address, PoolKey calldata, address) external view returns (bool) {
+        return authorized;
     }
 }
 
@@ -167,6 +189,7 @@ contract FundraisingTokenHookTest is Test {
     MockMsgSender internal router;
     MockMsgSender internal quoter;
     MockHookRegistry internal registry;
+    MockHookEmergencyManager internal emergencyManager;
     MockHookFactory internal factory;
     FundraisingTokenHookHarness internal hook;
     MockHookToken internal usdc;
@@ -180,9 +203,10 @@ contract FundraisingTokenHookTest is Test {
         stateView = new MockHookStateView();
         router = new MockMsgSender();
         quoter = new MockMsgSender();
+        emergencyManager = new MockHookEmergencyManager();
         factory = new MockHookFactory();
         usdc = new MockHookToken();
-        registry = new MockHookRegistry(address(router), address(quoter), address(stateView));
+        registry = new MockHookRegistry(address(router), address(quoter), address(stateView), address(emergencyManager));
 
         hook = new FundraisingTokenHookHarness(address(poolManager), address(factory), address(usdc), address(registry));
         factory.setProtocol(
@@ -249,6 +273,14 @@ contract FundraisingTokenHookTest is Test {
         assertEq(hook.exposedBeforeInitialize(key, 0), BaseHook.beforeInitialize.selector);
     }
 
+    function testBeforeInitializeRejectsUnauthorizedPool() public {
+        PoolKey memory key = _poolKey(address(token), address(usdc));
+        factory.setAuthorized(false);
+
+        vm.expectRevert(FundraisingTokenHook.InvalidPool.selector);
+        hook.exposedBeforeInitialize(key, 0);
+    }
+
     function testBeforeAddLiquidityBranches() public {
         PoolKey memory key = _poolKey(address(token), address(usdc));
         hook.exposedAfterInitialize(key, 0, 0);
@@ -300,6 +332,36 @@ contract FundraisingTokenHookTest is Test {
         assertEq(poolManager.lastTakeAmount(), 1 ether);
     }
 
+    function testBeforeSwapExactOutputSellDoesNotTakeFee() public {
+        PoolKey memory key = _poolKey(address(token), address(usdc));
+        hook.exposedAfterInitialize(key, 0, 0);
+
+        vm.roll(block.number + 20);
+        vm.warp(block.timestamp + 2 hours);
+
+        SwapParams memory params = SwapParams({zeroForOne: true, amountSpecified: 100 ether, sqrtPriceLimitX96: 0});
+        (, BeforeSwapDelta delta,) = hook.exposedBeforeSwap(user, key, params, bytes(""));
+
+        assertEq(int256(delta.getSpecifiedDelta()), 0);
+        assertEq(poolManager.lastTakeAmount(), 0);
+    }
+
+    function testAfterSwapExactOutputSellTakesFeeFromActualInputUsed() public {
+        PoolKey memory key = _poolKey(address(token), address(usdc));
+        hook.exposedAfterInitialize(key, 0, 0);
+
+        vm.roll(block.number + 20);
+        vm.warp(block.timestamp + 2 hours);
+
+        SwapParams memory params = SwapParams({zeroForOne: true, amountSpecified: 100 ether, sqrtPriceLimitX96: 0});
+        (, int128 fee) = hook.exposedAfterSwap(user, key, params, toBalanceDelta(-80 ether, 100 ether), bytes(""));
+
+        assertEq(fee, int128(int256(8e17)));
+        assertEq(poolManager.lastTakeCurrency(), address(token));
+        assertEq(poolManager.lastTakeTo(), vault);
+        assertEq(poolManager.lastTakeAmount(), 8e17);
+    }
+
     function testBeforeSwapRejectsOversizedFeeCast() public {
         PoolKey memory key = _poolKey(address(token), address(usdc));
         hook.exposedAfterInitialize(key, 0, 0);
@@ -308,7 +370,7 @@ contract FundraisingTokenHookTest is Test {
         vm.warp(block.timestamp + 2 hours);
 
         SwapParams memory params =
-            SwapParams({zeroForOne: true, amountSpecified: int256(1 << 134), sqrtPriceLimitX96: 0});
+            SwapParams({zeroForOne: true, amountSpecified: -int256(1 << 134), sqrtPriceLimitX96: 0});
         vm.expectRevert(FundraisingTokenHook.FeeToLarge.selector);
         hook.exposedBeforeSwap(user, key, params, bytes(""));
     }
@@ -380,6 +442,28 @@ contract FundraisingTokenHookTest is Test {
         (, int128 feeWhenThresholdReached) =
             hook.exposedAfterSwap(address(router), key, buying, toBalanceDelta(100 ether, 0), bytes(""));
         assertEq(feeWhenThresholdReached, 0);
+    }
+
+    function testTaxRoutingStopsWhenEmergencyIsActive() public {
+        PoolKey memory key = _poolKey(address(token), address(usdc));
+        hook.exposedAfterInitialize(key, 0, 0);
+
+        vm.roll(block.number + 20);
+        vm.warp(block.timestamp + 2 hours);
+        emergencyManager.setEmergencyActive(true);
+
+        SwapParams memory selling = SwapParams({zeroForOne: true, amountSpecified: 100 ether, sqrtPriceLimitX96: 0});
+        (, BeforeSwapDelta sellDelta,) = hook.exposedBeforeSwap(user, key, selling, bytes(""));
+        assertEq(int256(sellDelta.getSpecifiedDelta()), 0);
+        (, int128 sellFee) = hook.exposedAfterSwap(user, key, selling, toBalanceDelta(-80 ether, 100 ether), bytes(""));
+        assertEq(sellFee, 0);
+        assertEq(poolManager.lastTakeAmount(), 0);
+
+        SwapParams memory buying = SwapParams({zeroForOne: false, amountSpecified: -10 ether, sqrtPriceLimitX96: 0});
+        router.setMsgSender(user);
+        (, int128 buyFee) = hook.exposedAfterSwap(address(router), key, buying, toBalanceDelta(100 ether, 0), bytes(""));
+        assertEq(buyFee, 0);
+        assertEq(poolManager.lastTakeAmount(), 0);
     }
 
     function testTreasuryPercentTaxFlagAndMsgSenderBranches() public {

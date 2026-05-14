@@ -120,13 +120,22 @@ contract MockVaultIntegrationRegistry {
 
 contract MockVaultFactory {
     PoolKey internal poolKey;
+    bool internal authorized = true;
 
     function setPoolKey(PoolKey memory newPoolKey) external {
         poolKey = newPoolKey;
     }
 
+    function setAuthorized(bool authorized_) external {
+        authorized = authorized_;
+    }
+
     function getPoolKeys(address) external view returns (PoolKey memory) {
         return poolKey;
+    }
+
+    function isAuthorizedHookPool(address, PoolKey calldata, address) external view returns (bool) {
+        return authorized;
     }
 }
 
@@ -352,6 +361,48 @@ contract VaultTest is Test {
             100,
             address(factory)
         );
+
+        address[] memory noBeneficiaries = new address[](0);
+        vm.expectRevert(Vault.NoBeneficiaries.selector);
+        new Vault(
+            address(usdc),
+            1 days,
+            noBeneficiaries,
+            5e17,
+            address(registry),
+            address(emergencyManager),
+            100,
+            address(factory)
+        );
+
+        address[] memory zeroBeneficiary = new address[](1);
+        zeroBeneficiary[0] = address(0);
+        vm.expectRevert(Vault.ZeroBeneficiary.selector);
+        new Vault(
+            address(usdc),
+            1 days,
+            zeroBeneficiary,
+            5e17,
+            address(registry),
+            address(emergencyManager),
+            100,
+            address(factory)
+        );
+
+        address[] memory duplicateBeneficiaries = new address[](2);
+        duplicateBeneficiaries[0] = beneficiaryA;
+        duplicateBeneficiaries[1] = beneficiaryA;
+        vm.expectRevert(Vault.DuplicateBeneficiary.selector);
+        new Vault(
+            address(usdc),
+            1 days,
+            duplicateBeneficiaries,
+            5e17,
+            address(registry),
+            address(emergencyManager),
+            100,
+            address(factory)
+        );
     }
 
     function testExecuteMonthlyEventRevertsWhenHookIsNotConfigured() public {
@@ -433,8 +484,9 @@ contract VaultTest is Test {
         smallVault.executeMonthlyEvent();
     }
 
-    function testExecuteMonthlyEventRevertsWithoutBeneficiaries() public {
-        Vault emptyVault = new Vault(
+    function testConstructorRejectsVaultWithoutBeneficiaries() public {
+        vm.expectRevert(Vault.NoBeneficiaries.selector);
+        new Vault(
             address(usdc),
             1 days,
             new address[](0),
@@ -444,21 +496,6 @@ contract VaultTest is Test {
             1,
             address(factory)
         );
-
-        vm.prank(address(factory));
-        emptyVault.setFundraisingToken(address(fundraisingToken));
-        vm.prank(address(factory));
-        emptyVault.setHookAddress(address(hook));
-
-        vm.warp(block.timestamp + 1 days);
-        fundraisingToken.mint(address(emptyVault), 10);
-        hook.configure(0, 0, 0, false);
-        quoter.setQuote(9, false);
-        router.setSwapResult(address(usdc), 9, false);
-        usdc.mint(address(router), 9);
-
-        vm.expectRevert(Vault.NoBeneficiaries.selector);
-        emptyVault.executeMonthlyEvent();
     }
 
     function testExecuteMonthlyEventSwapsAndSplitsProceedsWithRemainder() public {

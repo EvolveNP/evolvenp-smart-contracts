@@ -12,6 +12,7 @@ import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 import {Helper} from "./libraries/Helper.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {IPoolInitializer_v4} from "@uniswap/v4-periphery/src/interfaces/IPoolInitializer_v4.sol";
 import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
@@ -21,6 +22,7 @@ import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 contract Factory is IFactory, Ownable {
+    using PoolIdLibrary for PoolKey;
     using SafeERC20 for IERC20Metadata;
     error ZeroAddress();
     error ZeroAmount();
@@ -46,6 +48,7 @@ contract Factory is IFactory, Ownable {
      * @dev Used to quickly access pool details for a given fundraising token.
      */
     mapping(address => PoolKey) public poolKeys;
+    mapping(address => bytes32) internal pendingHookPoolIds;
 
     /**
      *  @notice Emitted when a new fundraising vault is created.
@@ -229,8 +232,7 @@ contract Factory is IFactory, Ownable {
             hooks: IHooks(hookAddress)
         });
 
-        // set hook address in vault
-        Vault(_protocol.vault).setHookAddress(hookAddress);
+        pendingHookPoolIds[_protocol.fundraisingToken] = PoolId.unwrap(pool.toId());
 
         params[0] = abi.encodeWithSelector(IPoolInitializer_v4.initializePool.selector, pool, _startingPrice);
         params[1] = getModifyLiqiuidityParams(pool, amount0, amount1, _startingPrice);
@@ -277,6 +279,8 @@ contract Factory is IFactory, Ownable {
         _protocol.isLPCreated = true;
         _protocol.hook = hookAddress;
         poolKeys[_protocol.fundraisingToken] = pool;
+        delete pendingHookPoolIds[_protocol.fundraisingToken];
+        Vault(_protocol.vault).setHookAddress(hookAddress);
 
         emit LiquidityPoolCreated(_protocol.underlyingAddress, _protocol.fundraisingToken, _fundraisingToken);
     }
@@ -287,6 +291,25 @@ contract Factory is IFactory, Ownable {
 
     function getPoolKeys(address _fundraisingTokenAddress) external view returns (PoolKey memory) {
         return poolKeys[_fundraisingTokenAddress];
+    }
+
+    function isAuthorizedHookPool(address fundraisingToken, PoolKey calldata key, address hookAddress)
+        external
+        view
+        returns (bool)
+    {
+        bytes32 poolId = PoolId.unwrap(key.toId());
+        if (pendingHookPoolIds[fundraisingToken] == poolId) {
+            return address(key.hooks) == hookAddress;
+        }
+
+        FundraisingProtocol memory protocol = protocols[fundraisingToken];
+        if (!protocol.isLPCreated || protocol.hook != hookAddress) {
+            return false;
+        }
+
+        PoolKey memory storedPool = poolKeys[fundraisingToken];
+        return PoolId.unwrap(storedPool.toId()) == poolId && address(storedPool.hooks) == hookAddress;
     }
 
     /**
@@ -346,6 +369,7 @@ contract Factory is IFactory, Ownable {
         IIntegrationRegistry.Endpoint endpoint
     ) internal {
         _tryRecordEndpointFailure(endpoint);
+        delete pendingHookPoolIds[fundraisingToken];
         if (refundAmount != 0) {
             IERC20Metadata(underlying).safeTransfer(msg.sender, refundAmount);
         }

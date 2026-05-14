@@ -18,6 +18,7 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {TruncatedOracle} from "@uniswap/v4-periphery-trunc/libraries/TruncatedOracle.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 import {IFactory} from "./interfaces/IFactory.sol";
+import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 
 /**
  * @title FundraisingTokenHook
@@ -167,6 +168,12 @@ contract FundraisingTokenHook is BaseHook {
         if (key.fee != 0 || key.tickSpacing != TickMath.MAX_TICK_SPACING) {
             revert OnlyOneOraclePoolAllowed();
         }
+
+        (address fundraisingTokenAddress,) = _getFundraisingContext(key);
+
+        if (!IFactory(factoryAddress).isAuthorizedHookPool(fundraisingTokenAddress, key, address(this))) {
+            revert InvalidPool();
+        }
         return BaseHook.beforeInitialize.selector;
     }
 
@@ -178,9 +185,13 @@ contract FundraisingTokenHook is BaseHook {
     {
         bytes32 id = PoolId.unwrap(key.toId());
         (address fundraisingTokenAddress,) = _getFundraisingContext(key);
+
         launchTimestampByToken[fundraisingTokenAddress] = block.timestamp;
+
         launchBlockByToken[fundraisingTokenAddress] = block.number;
+
         (states[id].cardinality, states[id].cardinalityNext) = observations[id].initialize(_blockTimestamp(), tick);
+
         return BaseHook.afterInitialize.selector;
     }
 
@@ -203,11 +214,12 @@ contract FundraisingTokenHook is BaseHook {
     }
 
     /**
-     * @notice Hook executed before a swap — applies sell-side tax logic when conditions are met.
+     * @notice Hook executed before a swap — applies sell-side tax logic for exact-input sells.
      * @dev
      * This function is called by the Uniswap V4 PoolManager **before** executing a swap.
      * It identifies whether the fundraising token is being **sold** (swapped out of the pool) and,
-     * if so, deducts a protocol-defined fee which is sent directly to the treasury wallet.
+     * if so, deducts a protocol-defined fee for exact-input swaps. Exact-output sells are taxed
+     * in `_afterSwap`, where the actual fundraising-token input consumed by the swap is known.
      *
      * The function uses `tx.origin` instead of `msg.sender` because Uniswap’s router
      * contract typically calls the pool on behalf of the end user — `tx.origin`
@@ -250,13 +262,10 @@ contract FundraisingTokenHook is BaseHook {
 
         uint256 feeAmount;
         bool isTaxCutEnabled = checkIfTaxIncurred(key, caller);
-        if (isSelling && isTaxCutEnabled) {
-            uint256 swapAmount =
-                params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
-            // Correct denominator usage
+        if (isSelling && isTaxCutEnabled && params.amountSpecified < 0) {
+            uint256 swapAmount = uint256(-params.amountSpecified);
             feeAmount = (swapAmount * TAX_FEE_PERCENTAGE) / TAX_FEE_DENOMINATOR;
 
-            // Ensure fits in signed int128 before casting in any downstream use
             if (feeAmount >= ((uint256(1) << 127) - 1)) revert FeeToLarge();
 
             poolManager.take(Currency.wrap(fundraisingTokenAddress), vault, feeAmount);
@@ -271,12 +280,13 @@ contract FundraisingTokenHook is BaseHook {
     }
 
     /**
-     * @notice Hook executed after a swap — enforces buy restrictions and collects applicable buy fees.
+     * @notice Hook executed after a swap — enforces buy restrictions and collects applicable swap fees.
      * @dev This hook:
-     *      - Determines whether the swap represents a buy of the fundraising token.
+     *      - Determines whether the swap represents a buy or an exact-output sell of the fundraising token.
      *      - Enforces launch protection, per-wallet cooldowns, and max-buy limits using `isTransferBlocked`.
      *      - Records the buyer’s last purchase timestamp during the launch hold period.
-     *      - Optionally applies a buy tax via `checkIfTaxIncurred` and sends the fee to the treasury wallet.
+     *      - Optionally applies a buy tax or exact-output sell tax via `checkIfTaxIncurred`
+     *        and sends the fee to the treasury wallet.
      *
      *      ⚠️ `tx.origin` is intentionally used here instead of `msg.sender` or Uniswap’s router-provided `sender`,
      *      because Uniswap v4 passes the **router contract address** as the swap initiator. Using `tx.origin`
@@ -310,10 +320,10 @@ contract FundraisingTokenHook is BaseHook {
         (address fundraisingTokenAddress, address vault) = _getFundraisingContext(key);
 
         bool isFundraisingTokenIsCurrencyZero = currency0 == fundraisingTokenAddress;
-
-        // isBuying: if fundraising token is currency0 and swap is one->zero? (original logic kept)
         bool isBuying = (isFundraisingTokenIsCurrencyZero && !params.zeroForOne)
             || (!isFundraisingTokenIsCurrencyZero && params.zeroForOne);
+        bool isSelling = (isFundraisingTokenIsCurrencyZero && params.zeroForOne)
+            || (!isFundraisingTokenIsCurrencyZero && !params.zeroForOne);
 
         uint256 feeAmount;
         bool isTaxCutEnabled = checkIfTaxIncurred(key, caller);
@@ -331,9 +341,20 @@ contract FundraisingTokenHook is BaseHook {
 
             if (isTaxCutEnabled) {
                 feeAmount = (uint256(_amountOut) * TAX_FEE_PERCENTAGE) / TAX_FEE_DENOMINATOR;
-                // sends the fee to treasury wallet
+                if (feeAmount >= ((uint256(1) << 127) - 1)) revert FeeToLarge();
                 poolManager.take(Currency.wrap(fundraisingTokenAddress), vault, feeAmount);
             }
+        } else if (isSelling && isTaxCutEnabled && params.amountSpecified > 0) {
+            int256 fundraisingTokenDelta = isFundraisingTokenIsCurrencyZero ? delta.amount0() : delta.amount1();
+            if (fundraisingTokenDelta >= 0) {
+                return (BaseHook.afterSwap.selector, 0);
+            }
+
+            uint256 actualInputUsed = uint256(-fundraisingTokenDelta);
+            feeAmount = (actualInputUsed * TAX_FEE_PERCENTAGE) / TAX_FEE_DENOMINATOR;
+            if (feeAmount >= ((uint256(1) << 127) - 1)) revert FeeToLarge();
+
+            poolManager.take(Currency.wrap(fundraisingTokenAddress), vault, feeAmount);
         }
         return (BaseHook.afterSwap.selector, int128(int256(feeAmount)));
     }
@@ -403,6 +424,9 @@ contract FundraisingTokenHook is BaseHook {
      */
     function checkIfTaxIncurred(PoolKey calldata key, address sender) internal view returns (bool) {
         (, address vault) = _getFundraisingContext(key);
+        if (IEmergencyManager(integrationRegistry.emergencyManager()).isEmergencyActive()) {
+            return false;
+        }
         return (getTreasuryBalanceInPerecent(key) < maximumThreshold) && sender != vault;
     }
 
@@ -466,6 +490,9 @@ contract FundraisingTokenHook is BaseHook {
 
         IFactory.FundraisingProtocol memory protocol = IFactory(factoryAddress).getProtocol(fundraisingTokenAddress);
         if (protocol.fundraisingToken != fundraisingTokenAddress || protocol.vault == address(0)) revert InvalidPool();
+        if (!IFactory(factoryAddress).isAuthorizedHookPool(fundraisingTokenAddress, key, address(this))) {
+            revert InvalidPool();
+        }
 
         vault = protocol.vault;
     }

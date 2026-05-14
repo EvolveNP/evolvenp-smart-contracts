@@ -189,6 +189,7 @@ contract EmergencyManager is IEmergencyManager {
         armedReasonFlags = 0;
         quoteFailures.consecutive = 0;
         swapFailures.consecutive = 0;
+        endpointFailures.consecutive = 0;
     }
 
     function _resolvedMode() internal view returns (EmergencyState) {

@@ -9,7 +9,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Factory} from "../src/Factory.sol";
 import {IFactory} from "../src/interfaces/IFactory.sol";
 import {IIntegrationRegistry} from "../src/interfaces/IIntegrationRegistry.sol";
-import {Vault} from "../src/Vault.sol";
+import {VaultV2} from "../src/VaultV2.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
@@ -119,7 +119,9 @@ contract MockFactoryRegistry {
 }
 
 contract FactoryHarness is Factory {
-    constructor(address registry, address emergencyManager, address usdc) Factory(registry, emergencyManager, usdc) {}
+    constructor(address registry, address emergencyManager, address usdc, VaultV2.VrfConfig memory vrfConfig)
+        Factory(registry, emergencyManager, usdc, vrfConfig)
+    {}
 
     function exposedGetModifyLiqiuidityParams(
         PoolKey memory key,
@@ -142,6 +144,8 @@ contract FactoryTest is Test {
     address internal protocolAdmin = address(0xA11CE);
     address internal thirdParty = address(0xB0B);
     address internal fakeHook = address(0x9999);
+    address internal vrfCoordinator = address(0x8888);
+    bytes32 internal keyHash = keccak256("factory key hash");
 
     function setUp() public {
         vm.prank(protocolAdmin);
@@ -153,12 +157,22 @@ contract FactoryTest is Test {
         registry.setHookAddress(fakeHook);
 
         vm.prank(protocolAdmin);
-        factory = new FactoryHarness(address(registry), address(emergencyManager), address(usdc));
+        factory = new FactoryHarness(address(registry), address(emergencyManager), address(usdc), _vrfConfig());
     }
 
     function testConstructorRejectsZeroAddresses() public {
         vm.expectRevert(Factory.ZeroAddress.selector);
-        new FactoryHarness(address(0), address(emergencyManager), address(usdc));
+        new FactoryHarness(address(0), address(emergencyManager), address(usdc), _vrfConfig());
+
+        VaultV2.VrfConfig memory invalidVrf = _vrfConfig();
+        invalidVrf.coordinator = address(0);
+        vm.expectRevert(Factory.ZeroAddress.selector);
+        new FactoryHarness(address(registry), address(emergencyManager), address(usdc), invalidVrf);
+
+        invalidVrf = _vrfConfig();
+        invalidVrf.subscriptionId = 0;
+        vm.expectRevert(VaultV2.InvalidVrfConfig.selector);
+        new FactoryHarness(address(registry), address(emergencyManager), address(usdc), invalidVrf);
     }
 
     function testCreateFundraisingVaultOnlyOwner() public {
@@ -175,14 +189,14 @@ contract FactoryTest is Test {
         address[] memory zeroBeneficiary = new address[](1);
         zeroBeneficiary[0] = address(0);
         vm.prank(protocolAdmin);
-        vm.expectRevert(Vault.ZeroBeneficiary.selector);
+        vm.expectRevert(VaultV2.ZeroBeneficiary.selector);
         factory.createFundraisingVault("Fund", "FUND", address(usdc), zeroBeneficiary, 30 days, 5e17, 1e6, 1000);
 
         address[] memory duplicateBeneficiaries = new address[](2);
         duplicateBeneficiaries[0] = address(0x1111);
         duplicateBeneficiaries[1] = address(0x1111);
         vm.prank(protocolAdmin);
-        vm.expectRevert(Vault.DuplicateBeneficiary.selector);
+        vm.expectRevert(VaultV2.DuplicateBeneficiary.selector);
         factory.createFundraisingVault("Fund", "FUND", address(usdc), duplicateBeneficiaries, 30 days, 5e17, 1e6, 1000);
     }
 
@@ -204,6 +218,9 @@ contract FactoryTest is Test {
         assertEq(protocol.hook, address(0));
         assertFalse(protocol.isLPCreated);
         assertEq(MockFactoryToken(fundraisingToken).balanceOf(address(factory)), 750 * 10 ** usdc.decimals());
+        assertEq(VaultV2(vault).vrfCoordinator(), vrfCoordinator);
+        assertEq(VaultV2(vault).vrfKeyHash(), keyHash);
+        assertEq(VaultV2(vault).vrfSubscriptionId(), 1);
     }
 
     function testCreatePoolRejectsInvalidInputs() public {
@@ -259,7 +276,7 @@ contract FactoryTest is Test {
         IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
         assertTrue(protocol.isLPCreated);
         assertEq(protocol.hook, fakeHook);
-        assertEq(Vault(vault).hookAddress(), fakeHook);
+        assertEq(VaultV2(vault).hookAddress(), fakeHook);
 
         PoolKey memory poolKey = factory.getPoolKeys(fundraisingToken);
         address storedCurrency0 = Currency.unwrap(poolKey.currency0);
@@ -313,7 +330,7 @@ contract FactoryTest is Test {
         IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
         assertFalse(protocol.isLPCreated);
         assertEq(protocol.hook, address(0));
-        assertEq(Vault(vault).hookAddress(), address(0));
+        assertEq(VaultV2(vault).hookAddress(), address(0));
     }
 
     function testCreatePoolRevertsWhenSecondPermit2ApprovalFails() public {
@@ -342,7 +359,7 @@ contract FactoryTest is Test {
         IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
         assertFalse(protocol.isLPCreated);
         assertEq(protocol.hook, address(0));
-        assertEq(Vault(vault).hookAddress(), address(0));
+        assertEq(VaultV2(vault).hookAddress(), address(0));
     }
 
     function testCreatePoolRevertsWhenPositionManagerFails() public {
@@ -372,7 +389,7 @@ contract FactoryTest is Test {
         IFactory.FundraisingProtocol memory protocol = factory.getProtocol(fundraisingToken);
         assertFalse(protocol.isLPCreated);
         assertEq(protocol.hook, address(0));
-        assertEq(Vault(vault).hookAddress(), address(0));
+        assertEq(VaultV2(vault).hookAddress(), address(0));
     }
 
     function testCreatePoolRevertsWhenAlreadyCreated() public {
@@ -447,6 +464,16 @@ contract FactoryTest is Test {
             }
         }
         revert("event not found");
+    }
+
+    function _vrfConfig() internal view returns (VaultV2.VrfConfig memory) {
+        return VaultV2.VrfConfig({
+            coordinator: vrfCoordinator,
+            keyHash: keyHash,
+            subscriptionId: 1,
+            requestConfirmations: 3,
+            callbackGasLimit: 500_000
+        });
     }
 
     function _storeProtocol(address key, address underlying, address vault, address hook, bool isCreated) internal {

@@ -1,0 +1,14 @@
+{
+  "chainId": 11155111,
+  "deployedAt": 1786712604,
+  "deployedMockUsdc": false,
+  "deployer": "0xB3FFde53f0076295f2C183f13b4A07dE288Df61D",
+  "emergencyManager": "0x433b1F17118bAF1E4Cb266f9016Aa01d18A75de2",
+  "factory": "0x2A568F8A61D1296729baB52Bfb9c60B96C227a10",
+  "factoryLibrary": "0x0D8e1BA90ed25187C0Bc3a30e9F803DfEe88eF3C",
+  "hook": "0x0000000000000000000000000000000000000000",
+  "hookDeployer": "0xeec2D22785191f7DEA8454C8bc7f637B2673aaC8",
+  "integrationRegistry": "0xe2D5301c449D14C84f37e929A795bDEF8af19a6b",
+  "usdc": "0xd96c5602E7590eC79E9d87fcdcaDa1af36254fA7",
+  "version": "1786712604"
+}

@@ -5,19 +5,17 @@ import {IFactory} from "./interfaces/IFactory.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {FundraisingToken} from "./FundraisingToken.sol";
 import {VaultV2} from "./VaultV2.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 import {Helper} from "./libraries/Helper.sol";
+import {FactoryLibrary} from "./libraries/FactoryLibrary.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {IPoolInitializer_v4} from "@uniswap/v4-periphery/src/interfaces/IPoolInitializer_v4.sol";
 import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -73,33 +71,6 @@ contract Factory is IFactory, Ownable {
     event LiquidityPoolCreated(address currency0, address currency1, address owner);
     event PoolCreationFailed(address fundraisingToken, bytes4 reason, IIntegrationRegistry.Endpoint endpoint);
 
-    /**
-     * @notice Ensures that the provided address is not the zero address.
-     * @dev Reverts with `ZeroAddress()` if `_address` is the zero address.
-     * @param _address The address to validate.
-     * @custom:netmod This modifier should be used to prevent zero address assignments in contract logic.
-     */
-    modifier nonZeroAddress(address _address) {
-        if (_address == address(0)) revert ZeroAddress();
-        _;
-    }
-
-    /**
-     * @notice Ensures that the provided amount is not zero.
-     * @dev Reverts with ZeroAmount() if `_amount` is zero.
-     * @param _amount The amount to check for non-zero value.
-     * @custom:netmod Guarantees that the function using this modifier will not execute with a zero amount.
-     */
-    modifier nonZeroAmount(uint256 _amount) {
-        if (_amount == 0) revert ZeroAmount();
-        _;
-    }
-
-    modifier onlySelf() {
-        if (msg.sender != address(this)) revert OnlySelf();
-        _;
-    }
-
     constructor(
         address _registryAddress,
         address _emergencyManagerAddress,
@@ -107,14 +78,11 @@ contract Factory is IFactory, Ownable {
         VaultV2.VrfConfig memory _vrfConfig
     )
         Ownable(msg.sender)
-        nonZeroAddress(_registryAddress)
-        nonZeroAddress(_emergencyManagerAddress)
-        nonZeroAddress(_usdcAddress)
-        nonZeroAddress(_vrfConfig.coordinator)
     {
-        if (_vrfConfig.subscriptionId == 0) revert VaultV2.InvalidVrfConfig();
-        if (_vrfConfig.requestConfirmations == 0) revert VaultV2.InvalidVrfConfig();
-        if (_vrfConfig.callbackGasLimit == 0) revert VaultV2.InvalidVrfConfig();
+        _requireNonZeroAddress(_registryAddress);
+        _requireNonZeroAddress(_emergencyManagerAddress);
+        _requireNonZeroAddress(_usdcAddress);
+        _requireValidVrfConfig(_vrfConfig);
 
         registryAddress = _registryAddress;
         emergencyManagerAddress = _emergencyManagerAddress;
@@ -142,41 +110,37 @@ contract Factory is IFactory, Ownable {
 
         address _registryAddress = registryAddress;
         address _emergencyManager = emergencyManagerAddress;
-        VaultV2 vault = new VaultV2(
-            _underlyingAddress,
-            _intervalSeconds,
-            _beneficiaries,
-            _registryAddress,
-            _emergencyManager,
-            _minTokenBalanceToExecute,
-            address(this),
-            VaultV2.VrfConfig({
-                coordinator: vrfCoordinator,
-                keyHash: vrfKeyHash,
-                subscriptionId: vrfSubscriptionId,
-                requestConfirmations: vrfRequestConfirmations,
-                callbackGasLimit: vrfCallbackGasLimit
+        (address vaultAddress, address fundraisingTokenAddress) = FactoryLibrary.deployFundraisingVault(
+            FactoryLibrary.DeployFundraisingVaultParams({
+                tokenName: _tokenName,
+                tokenSymbol: _tokenSymbol,
+                underlyingAddress: _underlyingAddress,
+                beneficiaries: _beneficiaries,
+                intervalSeconds: _intervalSeconds,
+                registryAddress: _registryAddress,
+                emergencyManager: _emergencyManager,
+                minTokenBalanceToExecute: _minTokenBalanceToExecute,
+                factory: address(this),
+                vrfCoordinator: vrfCoordinator,
+                vrfKeyHash: vrfKeyHash,
+                vrfSubscriptionId: vrfSubscriptionId,
+                vrfRequestConfirmations: vrfRequestConfirmations,
+                vrfCallbackGasLimit: vrfCallbackGasLimit,
+                totalSupply: _totalSupply,
+                decimals: _decimals
             })
         );
-        IEmergencyManager(_emergencyManager).setReporter(address(vault), true);
+        IEmergencyManager(_emergencyManager).setReporter(vaultAddress, true);
 
-        // Deploy fundraising token
-        FundraisingToken fundraisingToken = new FundraisingToken(
-            _tokenName, _tokenSymbol, _decimals, address(this), address(vault), _totalSupply * 10 ** _decimals
-        );
-
-        // set fundraising token addrress in vault
-        vault.setFundraisingToken(address(fundraisingToken));
-
-        protocols[address(fundraisingToken)] = FundraisingProtocol({
-            fundraisingToken: address(fundraisingToken),
+        protocols[fundraisingTokenAddress] = FundraisingProtocol({
+            fundraisingToken: fundraisingTokenAddress,
             underlyingAddress: _underlyingAddress,
-            vault: address(vault),
+            vault: vaultAddress,
             hook: address(0),
             isLPCreated: false
         });
 
-        emit FundraisingVaultCreated(address(fundraisingToken), address(vault));
+        emit FundraisingVaultCreated(fundraisingTokenAddress, vaultAddress);
     }
 
     /**
@@ -208,11 +172,12 @@ contract Factory is IFactory, Ownable {
 
     function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1)
         external
-        nonZeroAddress(_fundraisingToken)
-        nonZeroAmount(_amount0)
-        nonZeroAmount(_amount1)
         onlyOwner
     {
+        _requireNonZeroAddress(_fundraisingToken);
+        _requireNonZeroAmount(_amount0);
+        _requireNonZeroAmount(_amount1);
+
         IIntegrationRegistry registry = IIntegrationRegistry(registryAddress);
         address positionManager = registry.positionManager();
         address permit2 = registry.permit2();
@@ -353,34 +318,30 @@ contract Factory is IFactory, Ownable {
         view
         returns (bytes memory)
     {
-        bytes memory actions;
-        bytes[] memory params;
-        actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
-        params = new bytes[](2);
-
-        int24 maxTickSpacing = TickMath.MAX_TICK_SPACING;
-
-        int24 tickLower = TickMath.minUsableTick(maxTickSpacing);
-        int24 tickUpper = TickMath.maxUsableTick(maxTickSpacing);
-
-        uint160 sqrtPriceAX96 = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtPriceBX96 = TickMath.getSqrtPriceAtTick(tickUpper);
-
-        uint128 _liquidity =
-            LiquidityAmounts.getLiquidityForAmounts(_startingPrice, sqrtPriceAX96, sqrtPriceBX96, _amount0, _amount1);
-
-        params[0] = abi.encode(key, tickLower, tickUpper, _liquidity, _amount0, _amount1, 0xdead, bytes(""));
-
-        params[1] = abi.encode(key.currency0, key.currency1);
-
-        uint256 deadline = block.timestamp + 1000;
-
-        return
-            abi.encodeWithSelector(IPositionManager.modifyLiquidities.selector, abi.encode(actions, params), deadline);
+        return FactoryLibrary.getModifyLiqiuidityParams(key, _amount0, _amount1, _startingPrice);
     }
 
-    function positionManagerMulticall(address positionManager, bytes[] calldata params) external onlySelf {
+    function positionManagerMulticall(address positionManager, bytes[] calldata params) external {
+        if (msg.sender != address(this)) revert OnlySelf();
         IPositionManager(positionManager).multicall(params);
+    }
+
+    function _requireNonZeroAddress(address target) internal pure {
+        FactoryLibrary.requireNonZeroAddress(target);
+    }
+
+    function _requireNonZeroAmount(uint256 amount) internal pure {
+        FactoryLibrary.requireNonZeroAmount(amount);
+    }
+
+    function _requireValidVrfConfig(VaultV2.VrfConfig memory vrfConfig) internal pure {
+        try FactoryLibrary.requireValidVrfConfig(vrfConfig) {}
+        catch (bytes memory reason) {
+            if (bytes4(reason) == FactoryLibrary.InvalidVrfConfig.selector) revert VaultV2.InvalidVrfConfig();
+            assembly ("memory-safe") {
+                revert(add(reason, 0x20), mload(reason))
+            }
+        }
     }
 
     function _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint endpoint) internal {

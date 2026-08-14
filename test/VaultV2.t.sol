@@ -210,8 +210,9 @@ contract MockV2VrfCoordinator {
     }
 
     function fulfill(address vault, uint256 requestId, uint256 word) external {
-        uint256[] memory randomWords = new uint256[](1);
+        uint256[] memory randomWords = new uint256[](2);
         randomWords[0] = word;
+        randomWords[1] = uint256(keccak256(abi.encode(word)));
         VaultV2(vault).rawFulfillRandomWords(requestId, randomWords);
     }
 
@@ -246,8 +247,13 @@ contract VaultV2Test is Test {
     event DonationEventRandomnessRequested(
         uint64 indexed cycleId, uint8 indexed eventIndex, uint256 indexed requestId, uint64 requestedAt
     );
+    event DonationEventScheduled(uint64 indexed cycleId, uint8 indexed eventIndex, uint64 scheduledEventAt);
     event DonationEventExecuted(uint64 indexed cycleId, uint8 indexed eventIndex, uint256 amountIn, uint256 amountOut);
     event DonationExecutionFailed(bytes4 reason);
+
+    uint8 internal constant UPKEEP_START_WINDOW = 1;
+    uint8 internal constant UPKEEP_REQUEST_DONATION_EVENT = 2;
+    uint8 internal constant UPKEEP_EXECUTE_DONATION_EVENT = 3;
 
     function setUp() public {
         fundraisingToken = new MockV2Token("Fund", "FUND", 6);
@@ -408,6 +414,7 @@ contract VaultV2Test is Test {
             uint64 startsAt,
             uint64 endsAt,
             uint64 lastRequestAt,
+            uint64 scheduledEventAt,
             uint64 lastEventAt,
             uint128 snapshotBalance,
             uint8 eventsExecuted,
@@ -420,6 +427,7 @@ contract VaultV2Test is Test {
         assertEq(startsAt, block.timestamp);
         assertEq(endsAt, block.timestamp + 7 days);
         assertEq(lastRequestAt, block.timestamp);
+        assertEq(scheduledEventAt, 0);
         assertEq(lastEventAt, 0);
         assertEq(snapshotBalance, 1_000);
         assertEq(eventsExecuted, 0);
@@ -430,7 +438,7 @@ contract VaultV2Test is Test {
         assertEq(vrf.lastSubId(), 1);
         assertEq(vrf.lastConfirmations(), 3);
         assertEq(vrf.lastCallbackGasLimit(), 500_000);
-        assertEq(vrf.lastNumWords(), 1);
+        assertEq(vrf.lastNumWords(), 2);
         assertFalse(vault.canExecuteDonationEvent());
     }
 
@@ -498,15 +506,29 @@ contract VaultV2Test is Test {
         vrf.fulfillWithEmptyWords(address(vault), requestId);
     }
 
-    function testVrfFulfillmentExecutesFirstDonationImmediately() public {
+    function testVrfFulfillmentSchedulesFirstDonationAndExecutionRunsWhenDue() public {
         uint256 requestId = _startWindow(1_000);
         _prepareSuccessfulSwap(95, 95);
 
-        vm.expectEmit(true, true, false, true);
-        emit DonationEventExecuted(1, 1, 10, 95);
+        vm.expectEmit(true, true, false, false);
+        emit DonationEventScheduled(1, 1, 0);
         vrf.fulfill(address(vault), requestId, 123);
 
-        (,,,, uint64 lastEventAt,, uint8 eventsExecuted, bool randomnessPending) = vault.donationWindow();
+        (,,,, uint64 scheduledEventAt, uint64 lastEventAt,, uint8 eventsExecuted, bool randomnessPending) =
+            vault.donationWindow();
+        assertGt(scheduledEventAt, 0);
+        assertEq(lastEventAt, 0);
+        assertEq(eventsExecuted, 0);
+        assertFalse(randomnessPending);
+        assertFalse(vault.canExecuteDonationEvent());
+
+        vm.warp(scheduledEventAt);
+        vm.expectEmit(true, true, false, true);
+        emit DonationEventExecuted(1, 1, 10, 95);
+        vault.executeDonationEvent();
+
+        (,,,, scheduledEventAt, lastEventAt,, eventsExecuted, randomnessPending) = vault.donationWindow();
+        assertEq(scheduledEventAt, 0);
         assertEq(lastEventAt, block.timestamp);
         assertEq(eventsExecuted, 1);
         assertFalse(randomnessPending);
@@ -527,12 +549,17 @@ contract VaultV2Test is Test {
         uint256 requestId = _startWindow(1_000);
         _prepareSuccessfulSwap(95, 190);
         vrf.fulfill(address(vault), requestId, 123);
+        (,,,, uint64 scheduledEventAt,,,,) = vault.donationWindow();
+        vm.warp(scheduledEventAt);
+        vault.executeDonationEvent();
 
         vm.expectRevert(VaultV2.EventNotEligible.selector);
         vault.requestDonationEvent();
 
         vm.warp(block.timestamp + vault.MIN_EVENT_SPACING());
-        assertTrue(vault.canExecuteDonationEvent());
+        (bool upkeepNeeded, bytes memory performData) = vault.checkUpkeep("");
+        assertTrue(upkeepNeeded);
+        assertEq(abi.decode(performData, (uint8)), UPKEEP_REQUEST_DONATION_EVENT);
 
         vm.expectEmit(true, true, true, true);
         emit DonationEventRandomnessRequested(1, 2, 2, uint64(block.timestamp));
@@ -540,11 +567,15 @@ contract VaultV2Test is Test {
         assertEq(secondRequestId, 2);
         assertFalse(vault.canExecuteDonationEvent());
 
+        vrf.fulfill(address(vault), secondRequestId, 456);
+        (,,,, scheduledEventAt,,,,) = vault.donationWindow();
+        vm.warp(scheduledEventAt);
+
         vm.expectEmit(true, true, false, true);
         emit DonationEventExecuted(1, 2, 10, 95);
-        vrf.fulfill(address(vault), secondRequestId, 456);
+        vault.executeDonationEvent();
 
-        (,,,,,, uint8 eventsExecuted, bool randomnessPending) = vault.donationWindow();
+        (,,,,,,, uint8 eventsExecuted, bool randomnessPending) = vault.donationWindow();
         assertEq(eventsExecuted, 2);
         assertFalse(randomnessPending);
         assertEq(usdc.balanceOf(beneficiaryA), 62);
@@ -553,37 +584,118 @@ contract VaultV2Test is Test {
         assertFalse(vault.canExecuteDonationEvent());
     }
 
+    function testCheckAndPerformUpkeepStartWindow() public {
+        (bool upkeepNeeded, bytes memory performData) = vault.checkUpkeep("");
+        assertFalse(upkeepNeeded);
+        assertEq(performData.length, 0);
+
+        vm.warp(block.timestamp + 1 days + 1);
+        fundraisingToken.mint(address(vault), 1_000);
+
+        (upkeepNeeded, performData) = vault.checkUpkeep("");
+        assertTrue(upkeepNeeded);
+        assertEq(abi.decode(performData, (uint8)), UPKEEP_START_WINDOW);
+
+        vm.expectEmit(true, true, true, true);
+        emit DonationEventRandomnessRequested(1, 1, 1, uint64(block.timestamp));
+        vault.performUpkeep(performData);
+
+        (,,,,,,, uint8 eventsExecuted, bool randomnessPending) = vault.donationWindow();
+        assertEq(eventsExecuted, 0);
+        assertTrue(randomnessPending);
+        assertEq(vrf.lastNumWords(), 2);
+    }
+
+    function testCheckAndPerformUpkeepExecutesScheduledThenRequestsSecondDonationEvent() public {
+        uint256 requestId = _startWindow(1_000);
+        _prepareSuccessfulSwap(95, 190);
+        vrf.fulfill(address(vault), requestId, 1);
+
+        (,,,, uint64 scheduledEventAt,,,,) = vault.donationWindow();
+        assertGt(scheduledEventAt, 0);
+
+        (bool upkeepNeeded,) = vault.checkUpkeep("");
+        assertFalse(upkeepNeeded);
+
+        vm.warp(scheduledEventAt);
+        bytes memory performData;
+        (upkeepNeeded, performData) = vault.checkUpkeep("");
+        assertTrue(upkeepNeeded);
+        assertEq(abi.decode(performData, (uint8)), UPKEEP_EXECUTE_DONATION_EVENT);
+
+        vm.expectEmit(true, true, false, true);
+        emit DonationEventExecuted(1, 1, 10, 95);
+        vault.performUpkeep(performData);
+
+        vm.warp(block.timestamp + vault.MIN_EVENT_SPACING());
+        (upkeepNeeded, performData) = vault.checkUpkeep("");
+        assertTrue(upkeepNeeded);
+        assertEq(abi.decode(performData, (uint8)), UPKEEP_REQUEST_DONATION_EVENT);
+
+        vm.expectEmit(true, true, true, true);
+        emit DonationEventRandomnessRequested(1, 2, 2, uint64(block.timestamp));
+        vault.performUpkeep(performData);
+
+        (,,,,,,, uint8 eventsExecuted, bool randomnessPending) = vault.donationWindow();
+        assertEq(eventsExecuted, 1);
+        assertTrue(randomnessPending);
+    }
+
+    function testPerformUpkeepRejectsStaleOrInvalidActions() public {
+        vm.expectRevert(VaultV2.EventNotEligible.selector);
+        vault.performUpkeep(abi.encode(UPKEEP_START_WINDOW));
+
+        uint256 requestId = _startWindow(1_000);
+        _prepareSuccessfulSwap(95, 95);
+        vm.expectRevert(VaultV2.EventNotEligible.selector);
+        vault.performUpkeep(abi.encode(UPKEEP_REQUEST_DONATION_EVENT));
+
+        vm.expectRevert(VaultV2.EventNotEligible.selector);
+        vault.performUpkeep(abi.encode(UPKEEP_EXECUTE_DONATION_EVENT));
+
+        vm.expectRevert(VaultV2.InvalidUpkeepAction.selector);
+        vault.performUpkeep(abi.encode(uint8(99)));
+
+        vrf.fulfill(address(vault), requestId, 1);
+    }
+
     function testDonationFailuresDoNotConsumeTrancheAndCanRequestAgain() public {
         uint256 requestId = _startWindow(1_000);
+        uint64 scheduledEventAt = _fulfillAndWarpToScheduled(requestId, 1);
+        assertEq(block.timestamp, scheduledEventAt);
 
         hook.configure(0, 0, 0, true);
         vm.expectEmit(false, false, false, true);
         emit DonationExecutionFailed(VaultV2.SellCheckFailed.selector);
-        vrf.fulfill(address(vault), requestId, 1);
-        (,,,,,, uint8 eventsExecuted, bool randomnessPending) = vault.donationWindow();
+        vault.executeDonationEvent();
+        (,,,,,,, uint8 eventsExecuted, bool randomnessPending) = vault.donationWindow();
         assertEq(eventsExecuted, 0);
         assertFalse(randomnessPending);
         assertEq(emergencyManager.lastEndpointFailure(), uint8(IIntegrationRegistry.Endpoint.STATE_VIEW));
-        assertTrue(vault.canExecuteDonationEvent());
+        (bool upkeepNeeded, bytes memory performData) = vault.checkUpkeep("");
+        assertTrue(upkeepNeeded);
+        assertEq(abi.decode(performData, (uint8)), UPKEEP_REQUEST_DONATION_EVENT);
 
         hook.configure(0, 0, 0, false);
         uint256 retryRequestId = vault.requestDonationEvent();
+        _fulfillAndWarpToScheduled(retryRequestId, 2);
         quoter.setQuote(0, true);
         vm.expectEmit(false, false, false, true);
         emit DonationExecutionFailed(VaultV2.QuoteFailed.selector);
-        vrf.fulfill(address(vault), retryRequestId, 2);
-        (,,,,,, eventsExecuted, randomnessPending) = vault.donationWindow();
+        vault.executeDonationEvent();
+        (,,,,,,, eventsExecuted, randomnessPending) = vault.donationWindow();
         assertEq(eventsExecuted, 0);
         assertFalse(randomnessPending);
         assertEq(emergencyManager.quoteFailureCount(), 1);
 
         retryRequestId = vault.requestDonationEvent();
+        _fulfillAndWarpToScheduled(retryRequestId, 3);
         quoter.setQuote(95, false);
         router.setSwapResult(address(usdc), 0, true);
         vm.expectEmit(false, false, false, true);
         emit DonationExecutionFailed(VaultV2.SwapFailed.selector);
-        vrf.fulfill(address(vault), retryRequestId, 3);
-        (,,,,,, eventsExecuted, randomnessPending) = vault.donationWindow();
+        vault.executeDonationEvent();
+        (,,,,,,, eventsExecuted, randomnessPending) = vault.donationWindow();
         assertEq(eventsExecuted, 0);
         assertFalse(randomnessPending);
         assertEq(emergencyManager.swapFailureCount(), 1);
@@ -591,63 +703,70 @@ contract VaultV2Test is Test {
 
     function testUnsafePriceEmergencyAndLowBalanceDoNotConsumeCallback() public {
         uint256 requestId = _startWindow(1_000);
+        _fulfillAndWarpToScheduled(requestId, 1);
         hook.configure(0, 1800 * 500, 0, false);
 
         vm.expectEmit(false, false, false, true);
         emit DonationExecutionFailed(VaultV2.UnsafePrice.selector);
-        vrf.fulfill(address(vault), requestId, 1);
-        (,,,,,, uint8 eventsExecuted, bool randomnessPending) = vault.donationWindow();
+        vault.executeDonationEvent();
+        (,,,,,,, uint8 eventsExecuted, bool randomnessPending) = vault.donationWindow();
         assertEq(eventsExecuted, 0);
         assertFalse(randomnessPending);
 
         hook.configure(0, 0, 0, false);
         requestId = vault.requestDonationEvent();
+        _fulfillAndWarpToScheduled(requestId, 2);
         emergencyManager.setEmergencyActive(true);
-        vm.expectEmit(false, false, false, true);
-        emit DonationExecutionFailed(VaultV2.EmegerncyIsActive.selector);
-        vrf.fulfill(address(vault), requestId, 2);
-        (,,,,,, eventsExecuted, randomnessPending) = vault.donationWindow();
+        vm.expectRevert(VaultV2.EventNotEligible.selector);
+        vault.executeDonationEvent();
+        (,,,,,,, eventsExecuted, randomnessPending) = vault.donationWindow();
         assertEq(eventsExecuted, 0);
         assertFalse(randomnessPending);
         emergencyManager.setEmergencyActive(false);
 
+        _prepareSuccessfulSwap(95, 95);
+        vault.executeDonationEvent();
+        vm.warp(block.timestamp + vault.MIN_EVENT_SPACING());
         requestId = vault.requestDonationEvent();
+        _fulfillAndWarpToScheduled(requestId, 3);
         fundraisingToken.burn(address(vault), 991);
-        vm.expectEmit(false, false, false, true);
-        emit DonationExecutionFailed(VaultV2.InsufficientBalance.selector);
-        vrf.fulfill(address(vault), requestId, 3);
-        (,,,,,, eventsExecuted, randomnessPending) = vault.donationWindow();
-        assertEq(eventsExecuted, 0);
-        assertFalse(randomnessPending);
+        vm.expectRevert(VaultV2.EventNotEligible.selector);
+        vault.executeDonationEvent();
+        assertFalse(vault.canExecuteDonationEvent());
     }
 
     function testEndpointFailureRecordingCanFailWithoutBlockingRetry() public {
         uint256 requestId = _startWindow(1_000);
         emergencyManager.setEndpointFailureShouldRevert(true);
+        _fulfillAndWarpToScheduled(requestId, 1);
         hook.configure(0, 0, 0, true);
 
         vm.expectEmit(false, false, false, true);
         emit DonationExecutionFailed(VaultV2.SellCheckFailed.selector);
-        vrf.fulfill(address(vault), requestId, 1);
+        vault.executeDonationEvent();
 
-        (,,,,,, uint8 eventsExecuted, bool randomnessPending) = vault.donationWindow();
+        (,,,,,,, uint8 eventsExecuted, bool randomnessPending) = vault.donationWindow();
         assertEq(eventsExecuted, 0);
         assertFalse(randomnessPending);
         assertEq(emergencyManager.lastEndpointFailure(), 0);
-        assertTrue(vault.canExecuteDonationEvent());
+        (bool upkeepNeeded, bytes memory performData) = vault.checkUpkeep("");
+        assertTrue(upkeepNeeded);
+        assertEq(abi.decode(performData, (uint8)), UPKEEP_REQUEST_DONATION_EVENT);
     }
 
     function testCannotStartNextWindowUntilPreviousCompletesThenIntervalPasses() public {
         uint256 requestId = _startWindow(1_000);
         _prepareSuccessfulSwap(95, 190);
-        vrf.fulfill(address(vault), requestId, 1);
+        _fulfillAndWarpToScheduled(requestId, 1);
+        vault.executeDonationEvent();
 
         vm.warp(block.timestamp + vault.MIN_EVENT_SPACING());
-        uint256 secondRequestId = vault.executeDonationEvent();
+        uint256 secondRequestId = vault.requestDonationEvent();
         vm.expectRevert(VaultV2.WindowAlreadyActive.selector);
         vault.startDonationWindow();
 
-        vrf.fulfill(address(vault), secondRequestId, 2);
+        _fulfillAndWarpToScheduled(secondRequestId, 2);
+        vault.executeDonationEvent();
         assertFalse(vault.canStartDonationWindow());
 
         vm.warp(block.timestamp + 1 days);
@@ -722,14 +841,21 @@ contract VaultV2Test is Test {
         uint256 requestId = tinyVault.startDonationWindow();
         vrf.fulfill(address(tinyVault), requestId, 1);
 
-        vm.expectRevert(VaultV2.ZeroSwapAmount.selector);
-        tinyVault.canExecuteDonationEvent();
+        assertFalse(tinyVault.canExecuteDonationEvent());
+        (bool upkeepNeeded,) = tinyVault.checkUpkeep("");
+        assertFalse(upkeepNeeded);
     }
 
     function _startWindow(uint256 balance) internal returns (uint256 requestId) {
         vm.warp(block.timestamp + 1 days);
         fundraisingToken.mint(address(vault), balance);
         requestId = vault.startDonationWindow();
+    }
+
+    function _fulfillAndWarpToScheduled(uint256 requestId, uint256 word) internal returns (uint64 scheduledEventAt) {
+        vrf.fulfill(address(vault), requestId, word);
+        (,,,, scheduledEventAt,,,,) = vault.donationWindow();
+        vm.warp(scheduledEventAt);
     }
 
     function _prepareSuccessfulSwap(uint256 quotedAmountOut, uint256 routerBalance) internal {

@@ -20,13 +20,14 @@ import {IVRFCoordinatorV2} from "./interfaces/IVRFCoordinatorV2Plus.sol";
  * Step-by-step lifecycle:
  * 1. Anyone calls {startDonationWindow} after the monthly interval has elapsed.
  * 2. The Vault snapshots its fundraising-token balance and requests Chainlink VRF for the first event.
- * 3. Chainlink calls {rawFulfillRandomWords}; the Vault immediately attempts the donation in that callback.
- * 4. After a successful first event and the minimum spacing, anyone may request VRF for the second event.
- * 5. Each successful callback swaps exactly 1% of the opening snapshot balance and distributes USDC to beneficiaries.
- * 6. If safety/integration checks fail, the event is not consumed and a new VRF request may be made later.
+ * 3. Chainlink calls {rawFulfillRandomWords}; the Vault derives and stores the next random execution timestamp.
+ * 4. Chainlink Automation or any caller executes the scheduled event once that timestamp is reached.
+ * 5. After a successful first event and the minimum spacing, anyone may request VRF for the second event.
+ * 6. Each successful execution swaps exactly 1% of the opening snapshot balance and distributes USDC to beneficiaries.
+ * 7. If safety/integration checks fail, the event is not consumed and a new VRF request may be made later.
  *
- * No future execution timestamp is stored. Observers can see that a VRF request is pending, but the exact execution
- * block is only revealed when the coordinator fulfills the request and the Vault attempts the donation.
+ * The future timestamp is unknowable until the VRF fulfillment arrives. Once fulfilled, the scheduled timestamp is
+ * public like all contract state, and execution remains permissionless after it becomes due.
  */
 contract VaultV2 is Swap {
     using SafeERC20 for IERC20;
@@ -71,6 +72,14 @@ contract VaultV2 is Swap {
     error WindowComplete();
     error UnknownRequest();
     error RandomnessPending();
+    error InvalidUpkeepAction();
+
+    /// @notice Chainlink Automation action marker for starting a new donation window.
+    uint8 internal constant UPKEEP_START_WINDOW = 1;
+    /// @notice Chainlink Automation action marker for requesting the next hidden-timing donation event.
+    uint8 internal constant UPKEEP_REQUEST_DONATION_EVENT = 2;
+    /// @notice Chainlink Automation action marker for executing a due scheduled donation event.
+    uint8 internal constant UPKEEP_EXECUTE_DONATION_EVENT = 3;
 
     /// @notice Chainlink VRF configuration used to request donation-window randomness.
     struct VrfConfig {
@@ -87,6 +96,7 @@ contract VaultV2 is Swap {
         uint64 startsAt;
         uint64 endsAt;
         uint64 lastRequestAt;
+        uint64 scheduledEventAt;
         uint64 lastEventAt;
         uint128 snapshotBalance;
         uint8 eventsExecuted;
@@ -140,6 +150,14 @@ contract VaultV2 is Swap {
     event DonationEventRandomnessRequested(
         uint64 indexed cycleId, uint8 indexed eventIndex, uint256 indexed requestId, uint64 requestedAt
     );
+
+    /**
+     * @notice Emitted when VRF schedules the next permissionless donation execution time.
+     * @param cycleId Monthly donation cycle id.
+     * @param eventIndex One-based tranche index scheduled for execution.
+     * @param scheduledEventAt Random future timestamp selected from the active window.
+     */
+    event DonationEventScheduled(uint64 indexed cycleId, uint8 indexed eventIndex, uint64 scheduledEventAt);
 
     /**
      * @notice Emitted after a successful tranche swap and distribution.
@@ -247,6 +265,7 @@ contract VaultV2 is Swap {
             startsAt: startsAt,
             endsAt: endsAt,
             lastRequestAt: 0,
+            scheduledEventAt: 0,
             lastEventAt: 0,
             snapshotBalance: uint128(balance),
             eventsExecuted: 0,
@@ -273,12 +292,13 @@ contract VaultV2 is Swap {
     }
 
     /**
-     * @notice Requests Chainlink VRF for the next hidden-timing donation event.
-     * @dev Kept as the external automation entrypoint. The actual swap executes only inside the VRF callback.
-     * @return requestId Chainlink VRF request id for the donation attempt.
+     * @notice Executes the currently scheduled donation event once its random timestamp is due.
+     * @dev Permissionless execution path used by Chainlink Automation and direct callers.
      */
-    function executeDonationEvent() external returns (uint256 requestId) {
-        return requestDonationEvent();
+    function executeDonationEvent() public {
+        if (!canExecuteDonationEvent()) revert EventNotEligible();
+        donationWindow.scheduledEventAt = 0;
+        _executeDonationEvent();
     }
 
     /**
@@ -289,16 +309,63 @@ contract VaultV2 is Swap {
     function requestDonationEvent() public returns (uint256 requestId) {
         IEmergencyManager manager = IEmergencyManager(emergencyManager);
         if (manager.isEmergencyActive()) revert EmegerncyIsActive();
-        if (!canExecuteDonationEvent()) revert EventNotEligible();
+        if (!_canRequestDonationEvent()) revert EventNotEligible();
 
         requestId = _requestDonationRandomness(donationWindow.eventsExecuted + 1);
     }
 
     /**
-     * @notice Executes the next eligible 1% donation event from a VRF callback.
+     * @notice Chainlink Automation-compatible readiness check.
+     * @dev
+     * Returns encoded perform data for exactly one permissionless action:
+     * - `UPKEEP_START_WINDOW` when a monthly window is due.
+     * - `UPKEEP_EXECUTE_DONATION_EVENT` when a scheduled donation timestamp is due.
+     * - `UPKEEP_REQUEST_DONATION_EVENT` when the next hidden-timing VRF request is eligible.
+     * @return upkeepNeeded True when Chainlink Automation should call {performUpkeep}.
+     * @return performData ABI-encoded upkeep action id.
+     */
+    function checkUpkeep(bytes calldata) external view returns (bool upkeepNeeded, bytes memory performData) {
+        if (canStartDonationWindow()) {
+            return (true, abi.encode(UPKEEP_START_WINDOW));
+        }
+        if (canExecuteDonationEvent()) {
+            return (true, abi.encode(UPKEEP_EXECUTE_DONATION_EVENT));
+        }
+        if (_canRequestDonationEvent()) {
+            return (true, abi.encode(UPKEEP_REQUEST_DONATION_EVENT));
+        }
+        return (false, bytes(""));
+    }
+
+    /**
+     * @notice Chainlink Automation-compatible execution entrypoint.
+     * @dev Re-checks current state before executing, so stale perform data cannot force an ineligible action.
+     * @param performData ABI-encoded action id returned by {checkUpkeep}.
+     */
+    function performUpkeep(bytes calldata performData) external {
+        uint8 action = abi.decode(performData, (uint8));
+        if (action == UPKEEP_START_WINDOW) {
+            if (!canStartDonationWindow()) revert EventNotEligible();
+            this.startDonationWindow();
+            return;
+        }
+        if (action == UPKEEP_REQUEST_DONATION_EVENT) {
+            if (!_canRequestDonationEvent()) revert EventNotEligible();
+            requestDonationEvent();
+            return;
+        }
+        if (action == UPKEEP_EXECUTE_DONATION_EVENT) {
+            executeDonationEvent();
+            return;
+        }
+        revert InvalidUpkeepAction();
+    }
+
+    /**
+     * @notice Executes the next eligible 1% donation event.
      * @dev Safety failures do not consume the event; only a successful swap/distribution increments the event count.
      */
-    function _executeDonationEventFromRandomness() internal {
+    function _executeDonationEvent() internal {
         IEmergencyManager manager = IEmergencyManager(emergencyManager);
         if (manager.isEmergencyActive()) {
             emit DonationExecutionFailed(EmegerncyIsActive.selector);
@@ -363,17 +430,43 @@ contract VaultV2 is Swap {
     }
 
     /**
-     * @notice Returns true when the next randomized donation event is executable.
+     * @notice Returns true when the next randomized donation event is scheduled and due.
      * @dev Useful for Chainlink Automation and permissionless callers.
      */
     function canExecuteDonationEvent() public view returns (bool) {
+        return _canExecuteScheduledDonationEvent();
+    }
+
+    /**
+     * @notice Returns true when Automation or any caller may request VRF for the next donation attempt.
+     * @dev Uses non-reverting tranche math so Automation checks remain safe even for tiny balances.
+     */
+    function _canRequestDonationEvent() internal view returns (bool) {
         DonationWindow memory window = donationWindow;
         if (!_hasIncompleteWindow()) return false;
         if (window.randomnessPending) return false;
+        if (window.scheduledEventAt != 0) return false;
         if (IEmergencyManager(emergencyManager).isEmergencyActive()) return false;
-        if (IERC20(fundraisingToken).balanceOf(address(this)) < _getTrancheAmountIn()) return false;
+        uint256 amountIn = _trancheAmountIn();
+        if (amountIn == 0) return false;
+        if (IERC20(fundraisingToken).balanceOf(address(this)) < amountIn) return false;
         if (window.eventsExecuted == 0) return true;
         return block.timestamp >= window.lastEventAt + MIN_EVENT_SPACING;
+    }
+
+    /**
+     * @notice Returns true when the stored random execution timestamp has arrived.
+     * @dev Uses non-reverting checks so Automation simulation cannot be griefed by tiny balances.
+     */
+    function _canExecuteScheduledDonationEvent() internal view returns (bool) {
+        DonationWindow memory window = donationWindow;
+        if (!_hasIncompleteWindow()) return false;
+        if (window.randomnessPending) return false;
+        if (window.scheduledEventAt == 0 || block.timestamp < window.scheduledEventAt) return false;
+        if (IEmergencyManager(emergencyManager).isEmergencyActive()) return false;
+        uint256 amountIn = _trancheAmountIn();
+        if (amountIn == 0) return false;
+        return IERC20(fundraisingToken).balanceOf(address(this)) >= amountIn;
     }
 
     /**
@@ -450,17 +543,48 @@ contract VaultV2 is Swap {
     }
 
     /**
-     * @notice Consumes a VRF fulfillment and immediately attempts the requested donation event.
-     * @dev No future event timestamp is stored. The randomness acts as an unpredictable callback trigger.
+     * @notice Consumes a VRF fulfillment and schedules the requested donation event timestamp.
+     * @dev The selected timestamp is public after fulfillment but unknowable before Chainlink returns randomness.
      * @param request Pending donation request metadata.
      * @param randomWords Chainlink VRF random words.
      */
     function _fulfillRandomWords(DonationRequest memory request, uint256[] calldata randomWords) internal {
         if (!_hasIncompleteWindow()) revert WindowNotActive();
         if (request.eventIndex != donationWindow.eventsExecuted + 1) revert UnknownRequest();
-        if (randomWords.length == 0) revert InvalidVrfConfig();
+        if (randomWords.length < 2) revert InvalidVrfConfig();
 
-        _executeDonationEventFromRandomness();
+        uint64 scheduledEventAt = _selectDonationTimestamp(request, randomWords);
+        donationWindow.scheduledEventAt = scheduledEventAt;
+        emit DonationEventScheduled(request.cycleId, request.eventIndex, scheduledEventAt);
+    }
+
+    /**
+     * @notice Derives a random future execution timestamp from Chainlink VRF words.
+     * @dev The first event leaves {MIN_EVENT_SPACING} room for the second event inside the window when possible.
+     * @param request Pending donation request metadata.
+     * @param randomWords Chainlink VRF random words.
+     * @return scheduledEventAt Timestamp at which the event becomes executable.
+     */
+    function _selectDonationTimestamp(DonationRequest memory request, uint256[] calldata randomWords)
+        internal
+        view
+        returns (uint64 scheduledEventAt)
+    {
+        DonationWindow memory window = donationWindow;
+        uint256 earliest = block.timestamp;
+        if (request.eventIndex == 1 && earliest < window.startsAt) earliest = window.startsAt;
+        if (request.eventIndex > 1) {
+            uint256 minSecondEventAt = uint256(window.lastEventAt) + MIN_EVENT_SPACING;
+            if (earliest < minSecondEventAt) earliest = minSecondEventAt;
+        }
+
+        uint256 latest = window.endsAt;
+        if (request.eventIndex == 1 && latest > MIN_EVENT_SPACING) latest -= MIN_EVENT_SPACING;
+
+        if (latest <= earliest) return uint64(earliest);
+
+        uint256 seed = uint256(keccak256(abi.encode(randomWords[0], randomWords[1], request.cycleId, request.eventIndex)));
+        scheduledEventAt = uint64(earliest + (seed % (latest - earliest + 1)));
     }
 
     /**
@@ -515,14 +639,14 @@ contract VaultV2 is Swap {
     }
 
     /**
-     * @notice Requests Chainlink VRF for one donation attempt without publishing a future execution timestamp.
+     * @notice Requests Chainlink VRF for one donation attempt without publishing the future execution timestamp yet.
      * @param eventIndex One-based donation event index being requested.
      * @return requestId Chainlink VRF request id.
      */
     function _requestDonationRandomness(uint8 eventIndex) internal returns (uint256 requestId) {
         if (donationWindow.randomnessPending) revert RandomnessPending();
         requestId = IVRFCoordinatorV2(vrfCoordinator)
-            .requestRandomWords(vrfKeyHash, vrfSubscriptionId, vrfRequestConfirmations, vrfCallbackGasLimit, 1);
+            .requestRandomWords(vrfKeyHash, vrfSubscriptionId, vrfRequestConfirmations, vrfCallbackGasLimit, 2);
         donationWindow.randomnessPending = true;
         donationWindow.lastRequestAt = uint64(block.timestamp);
         requestById[requestId] = DonationRequest({cycleId: donationWindow.cycleId, eventIndex: eventIndex});

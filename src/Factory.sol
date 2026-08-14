@@ -6,7 +6,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {FundraisingToken} from "./FundraisingToken.sol";
-import {Vault} from "./Vault.sol";
+import {VaultV2} from "./VaultV2.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
@@ -37,6 +37,11 @@ contract Factory is IFactory, Ownable {
     address public immutable registryAddress;
     address public immutable emergencyManagerAddress;
     address public immutable usdcAddress;
+    address public immutable vrfCoordinator;
+    bytes32 public immutable vrfKeyHash;
+    uint64 public immutable vrfSubscriptionId;
+    uint16 public immutable vrfRequestConfirmations;
+    uint32 public immutable vrfCallbackGasLimit;
 
     /**
      * @notice Mapping storing fundraising protocol details by non-profit owner address.
@@ -95,15 +100,30 @@ contract Factory is IFactory, Ownable {
         _;
     }
 
-    constructor(address _registryAddress, address _emergencyManagerAddress, address _usdcAddress)
+    constructor(
+        address _registryAddress,
+        address _emergencyManagerAddress,
+        address _usdcAddress,
+        VaultV2.VrfConfig memory _vrfConfig
+    )
         Ownable(msg.sender)
         nonZeroAddress(_registryAddress)
         nonZeroAddress(_emergencyManagerAddress)
         nonZeroAddress(_usdcAddress)
+        nonZeroAddress(_vrfConfig.coordinator)
     {
+        if (_vrfConfig.subscriptionId == 0) revert VaultV2.InvalidVrfConfig();
+        if (_vrfConfig.requestConfirmations == 0) revert VaultV2.InvalidVrfConfig();
+        if (_vrfConfig.callbackGasLimit == 0) revert VaultV2.InvalidVrfConfig();
+
         registryAddress = _registryAddress;
         emergencyManagerAddress = _emergencyManagerAddress;
         usdcAddress = _usdcAddress;
+        vrfCoordinator = _vrfConfig.coordinator;
+        vrfKeyHash = _vrfConfig.keyHash;
+        vrfSubscriptionId = _vrfConfig.subscriptionId;
+        vrfRequestConfirmations = _vrfConfig.requestConfirmations;
+        vrfCallbackGasLimit = _vrfConfig.callbackGasLimit;
     }
 
     function createFundraisingVault(
@@ -112,7 +132,7 @@ contract Factory is IFactory, Ownable {
         address _underlyingAddress,
         address[] memory _beneficiaries,
         uint256 _intervalSeconds,
-        uint256 _swapPercentage,
+        uint256,
         uint256 _minTokenBalanceToExecute,
         uint256 _totalSupply
     ) external onlyOwner {
@@ -122,15 +142,21 @@ contract Factory is IFactory, Ownable {
 
         address _registryAddress = registryAddress;
         address _emergencyManager = emergencyManagerAddress;
-        Vault vault = new Vault(
+        VaultV2 vault = new VaultV2(
             _underlyingAddress,
             _intervalSeconds,
             _beneficiaries,
-            _swapPercentage,
             _registryAddress,
             _emergencyManager,
             _minTokenBalanceToExecute,
-            address(this)
+            address(this),
+            VaultV2.VrfConfig({
+                coordinator: vrfCoordinator,
+                keyHash: vrfKeyHash,
+                subscriptionId: vrfSubscriptionId,
+                requestConfirmations: vrfRequestConfirmations,
+                callbackGasLimit: vrfCallbackGasLimit
+            })
         );
         IEmergencyManager(_emergencyManager).setReporter(address(vault), true);
 
@@ -280,7 +306,7 @@ contract Factory is IFactory, Ownable {
         _protocol.hook = hookAddress;
         poolKeys[_protocol.fundraisingToken] = pool;
         delete pendingHookPoolIds[_protocol.fundraisingToken];
-        Vault(_protocol.vault).setHookAddress(hookAddress);
+        VaultV2(_protocol.vault).setHookAddress(hookAddress);
 
         emit LiquidityPoolCreated(_protocol.underlyingAddress, _protocol.fundraisingToken, _fundraisingToken);
     }

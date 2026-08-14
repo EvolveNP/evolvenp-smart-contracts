@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.8.26;
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Swap} from "./abstracts/Swap.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {IFactory} from "./interfaces/IFactory.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IHook} from "./interfaces/IHook.sol";
+import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
+
+contract Vault is Swap {
+    using SafeERC20 for IERC20;
+    /**
+     * Errors
+     */
+    error EmegerncyIsActive();
+    error InvalidInterval();
+    error InvalidSwapPercentage();
+    error NotDue();
+    error InsufficientBalance();
+    error UnsafePrice();
+    error TransferFailed();
+    error NotFactory();
+    error OnlySelf();
+    error NoBeneficiaries();
+    error ZeroBeneficiary();
+    error DuplicateBeneficiary();
+    error ZeroSwapAmount();
+    error SellCheckFailed();
+    error QuoteFailed();
+    error SwapFailed();
+    error FundraisingTokenNotConfigured();
+    error HookNotConfigured();
+    error PoolNotConfigured();
+
+    address public fundraisingToken; // The address of the fundraising token
+    address public immutable underlyingAsset; // The address of the underlying asset
+    uint256 public immutable intervalSeconds;
+    uint256 public lastSuccessAt; // Timestamp of the last successful operation
+    address[] public beneficiaries;
+    uint256 public swapPercentage; // The percentage of the swap in 18 decimals (e.g., 500000000000000000 for 50%)
+    address public emergencyManager; // The address of the emergency manager contract
+    uint256 public immutable minTokenBalanceToExecute; //
+    address public immutable factoryAddress;
+    address public hookAddress;
+    uint32 public constant oracleObservationInterval = 1800; // Oracle observation interval in seconds -> 30 mins
+    int24 public constant maxTickDeviation = 198; // Maximum tick deviation for swaps 2%
+
+    /**
+     * @notice This event is used to log successful transfers to non-profit organizations.
+     * @param recipient The address of the non-profit receiving funds.
+     * @param amount The amount of funds transferred.
+     * @dev Emitted when funds are transferred to a non-profit recipient.
+     */
+    event FundsTransferredToNonProfit(address recipient, uint256 amount);
+    event MonthlyExecutionFailed(bytes4 reason);
+
+    modifier onlyFactory() {
+        if (msg.sender != factoryAddress) revert NotFactory();
+        _;
+    }
+
+    modifier onlySelf() {
+        if (msg.sender != address(this)) revert OnlySelf();
+        _;
+    }
+
+    constructor(
+        address _underlyingAsset,
+        uint256 _intervalSeconds,
+        address[] memory _beneficiaries,
+        uint256 _swapPercentage,
+        address _integrationRegistry,
+        address _emergencyManager,
+        uint256 _minTokenBalanceToExecute,
+        address _factoryAddress
+    )
+        Swap(_integrationRegistry)
+        nonZeroAddress(_underlyingAsset)
+        nonZeroAddress(_emergencyManager)
+        nonZeroAddress(_factoryAddress)
+    {
+        if (_intervalSeconds == 0) revert InvalidInterval();
+        if (_swapPercentage == 0 || _swapPercentage > 1e18) revert InvalidSwapPercentage();
+        _validateBeneficiaries(_beneficiaries);
+        underlyingAsset = _underlyingAsset;
+        intervalSeconds = _intervalSeconds;
+        beneficiaries = _beneficiaries;
+        swapPercentage = _swapPercentage;
+        emergencyManager = _emergencyManager;
+        minTokenBalanceToExecute = _minTokenBalanceToExecute;
+        factoryAddress = _factoryAddress;
+        lastSuccessAt = block.timestamp;
+    }
+
+    function executeMonthlyEvent() external {
+        IEmergencyManager manager = IEmergencyManager(emergencyManager);
+
+        if (manager.isEmergencyActive()) revert EmegerncyIsActive();
+        if (fundraisingToken == address(0)) revert FundraisingTokenNotConfigured();
+        if (block.timestamp < lastSuccessAt + intervalSeconds) revert NotDue();
+        if (IERC20(fundraisingToken).balanceOf(address(this)) < minTokenBalanceToExecute) revert InsufficientBalance();
+        if (hookAddress == address(0)) revert HookNotConfigured();
+        _getPoolKey();
+        bool shouldSell;
+        try this.checkShouldAllowSell() returns (bool allowed) {
+            shouldSell = allowed;
+        } catch {
+            _tryRecordEndpointFailure(manager);
+            emit MonthlyExecutionFailed(SellCheckFailed.selector);
+            return;
+        }
+        if (!shouldSell) revert UnsafePrice();
+
+        uint256 amountIn = _getSwapAmountIn();
+        uint256 minAmountOut;
+        try this.quoteFundraisingTokenSwap(uint128(amountIn)) returns (uint256 quotedMinAmountOut) {
+            minAmountOut = quotedMinAmountOut;
+            manager.recordQuoteSuccess();
+        } catch {
+            manager.recordQuoteFailure();
+            emit MonthlyExecutionFailed(QuoteFailed.selector);
+            return;
+        }
+
+        uint256 amountOut;
+        try this.swapFundraisingToken(uint128(amountIn), uint128(minAmountOut)) returns (uint256 swappedAmountOut) {
+            amountOut = swappedAmountOut;
+            manager.recordSwapSuccess();
+        } catch {
+            manager.recordSwapFailure();
+            emit MonthlyExecutionFailed(SwapFailed.selector);
+            return;
+        }
+
+        _finalizeSuccessfulExecution(amountOut);
+    }
+
+    function isDue() external view returns (bool) {
+        if (
+            block.timestamp >= lastSuccessAt + intervalSeconds
+                && !IEmergencyManager(emergencyManager).isEmergencyActive()
+                && IERC20(fundraisingToken).balanceOf(address(this)) >= minTokenBalanceToExecute
+        ) return true;
+        return false;
+    }
+
+    /**
+     * @notice Swaps all fundraising tokens held by the contract to underlying currency and transfers the proceeds to the non-profit organization wallet.
+     * @dev This function is intended to be called by Chainlink Automation (Keepers).
+     *      It determines the correct pool, calculates minimum expected output, performs the swap,
+     *      and then transfers the swapped funds (ETH or ERC20) to the owner's address.
+     *      Reverts if the token transfer or ETH transfer fails.
+     *
+     * Emits a {FundsTransferredToNonProfit} event indicating the owner and amount transferred.
+     */
+    function quoteFundraisingTokenSwap(uint128 amountIn) external onlySelf returns (uint256 minAmountOut) {
+        (PoolKey memory key, bool isCurrency0FundraisingToken) = _getPoolKey();
+        minAmountOut = getMinAmountOut(key, isCurrency0FundraisingToken, amountIn, bytes(""));
+    }
+
+    function swapFundraisingToken(uint128 amountIn, uint128 minAmountOut)
+        external
+        onlySelf
+        returns (uint256 amountOut)
+    {
+        (PoolKey memory key, bool isCurrency0FundraisingToken) = _getPoolKey();
+        amountOut = swapExactInputSingle(key, amountIn, minAmountOut, isCurrency0FundraisingToken);
+    }
+
+    function _getSwapAmountIn() internal view returns (uint256 amountIn) {
+        uint256 tokenBalance = IERC20(fundraisingToken).balanceOf(address(this));
+        amountIn = (tokenBalance * swapPercentage) / 1e18;
+        if (amountIn == 0) revert ZeroSwapAmount();
+    }
+
+    function checkShouldAllowSell() external view onlySelf returns (bool) {
+        return shouldAllowSell();
+    }
+
+    function shouldAllowSell() public view returns (bool) {
+        if (hookAddress == address(0)) revert HookNotConfigured();
+        IHook hook = IHook(hookAddress);
+        (PoolKey memory key, bool fundraisingIsToken0) = _getPoolKey();
+
+        uint32 interval = oracleObservationInterval;
+
+        uint32[] memory secondsAgos = new uint32[](2);
+        secondsAgos[0] = interval;
+        secondsAgos[1] = 0;
+
+        (int48[] memory tickCumulatives,) = hook.observe(key, secondsAgos);
+
+        int56 tickDelta = int56(tickCumulatives[1]) - int56(tickCumulatives[0]);
+
+        int24 avgTick = int24(tickDelta / int56(uint56(interval)));
+
+        int24 currentTick = hook.getCurrentTick(key);
+
+        if (fundraisingIsToken0) return avgTick - currentTick <= maxTickDeviation;
+        return currentTick - avgTick <= maxTickDeviation;
+    }
+
+    function _distributeProceeds(uint256 amountOut) internal {
+        uint256 beneficiaryCount = beneficiaries.length;
+        if (beneficiaryCount == 0) revert NoBeneficiaries();
+
+        uint256 amountPerBeneficiary = amountOut / beneficiaryCount;
+        uint256 remainder = amountOut % beneficiaryCount;
+
+        for (uint256 i; i < beneficiaryCount; ++i) {
+            uint256 payout = amountPerBeneficiary;
+            if (i == beneficiaryCount - 1) {
+                payout += remainder;
+            }
+            // Only USDC supproted
+            IERC20(underlyingAsset).safeTransfer(beneficiaries[i], payout);
+
+            emit FundsTransferredToNonProfit(beneficiaries[i], payout);
+        }
+    }
+
+    function setHookAddress(address _hookAddress) external onlyFactory {
+        hookAddress = _hookAddress;
+    }
+
+    function setFundraisingToken(address _fundraisingToken) external onlyFactory {
+        fundraisingToken = _fundraisingToken;
+    }
+
+    function _tryRecordEndpointFailure(IEmergencyManager manager) internal {
+        try manager.recordEndpointFailure(uint8(IIntegrationRegistry.Endpoint.STATE_VIEW)) {} catch {}
+    }
+
+    function _finalizeSuccessfulExecution(uint256 amountOut) internal {
+        _distributeProceeds(amountOut);
+        lastSuccessAt = block.timestamp;
+    }
+
+    function _validateBeneficiaries(address[] memory _beneficiaries) internal pure {
+        uint256 beneficiaryCount = _beneficiaries.length;
+        if (beneficiaryCount == 0) revert NoBeneficiaries();
+
+        for (uint256 i; i < beneficiaryCount; ++i) {
+            address beneficiary = _beneficiaries[i];
+            if (beneficiary == address(0)) revert ZeroBeneficiary();
+
+            for (uint256 j = i + 1; j < beneficiaryCount; ++j) {
+                if (beneficiary == _beneficiaries[j]) revert DuplicateBeneficiary();
+            }
+        }
+    }
+
+    function _getPoolKey() internal view returns (PoolKey memory key, bool isCurrency0FundraisingToken) {
+        key = IFactory(factoryAddress).getPoolKeys(fundraisingToken);
+        bool isCurrency0 = Currency.unwrap(key.currency0) == fundraisingToken;
+        bool isCurrency1 = Currency.unwrap(key.currency1) == fundraisingToken;
+        bool hasUnderlyingAsCurrency0 = Currency.unwrap(key.currency0) == underlyingAsset;
+        bool hasUnderlyingAsCurrency1 = Currency.unwrap(key.currency1) == underlyingAsset;
+        bool isExpectedPair = (isCurrency0 && hasUnderlyingAsCurrency1) || (isCurrency1 && hasUnderlyingAsCurrency0);
+        if (!isExpectedPair) revert PoolNotConfigured();
+        return (key, isCurrency0);
+    }
+}

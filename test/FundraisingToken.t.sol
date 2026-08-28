@@ -72,4 +72,25 @@ contract FundraisingTokenTest is Test {
         assertEq(tinySupplyToken.balanceOf(treasury), 0);
         assertEq(tinySupplyToken.totalSupply(), 0);
     }
+
+    function testOnlyVaultCanBurnVaultTokens() public {
+        uint256 burnAmount = 10 ether;
+        uint256 treasuryBalanceBefore = token.balanceOf(treasury);
+        uint256 totalSupplyBefore = token.totalSupply();
+
+        vm.expectRevert(FundraisingToken.OnlyVault.selector);
+        token.burnFromVault(burnAmount);
+
+        vm.prank(treasury);
+        token.burnFromVault(burnAmount);
+
+        assertEq(token.balanceOf(treasury), treasuryBalanceBefore - burnAmount);
+        assertEq(token.totalSupply(), totalSupplyBefore - burnAmount);
+    }
+
+    function testBurnFromVaultRejectsZeroAmount() public {
+        vm.prank(treasury);
+        vm.expectRevert(FundraisingToken.ZeroAmount.selector);
+        token.burnFromVault(0);
+    }
 }

@@ -97,6 +97,13 @@ contract DeployProtocol is Script {
                 subscriptionId: uint64(vm.envUint("VRF_SUBSCRIPTION_ID")),
                 requestConfirmations: uint16(vm.envOr("VRF_REQUEST_CONFIRMATIONS", uint256(3))),
                 callbackGasLimit: uint32(vm.envOr("VRF_CALLBACK_GAS_LIMIT", uint256(500_000)))
+            }),
+            VaultV2.SlotConfig({
+                slotsPerWindow: uint8(vm.envOr("SLOTS_PER_WINDOW", uint256(4))),
+                firstEventStartSlot: uint8(vm.envOr("FIRST_EVENT_START_SLOT", uint256(0))),
+                firstEventEndSlot: uint8(vm.envOr("FIRST_EVENT_END_SLOT", uint256(1))),
+                secondEventStartSlot: uint8(vm.envOr("SECOND_EVENT_START_SLOT", uint256(2))),
+                secondEventEndSlot: uint8(vm.envOr("SECOND_EVENT_END_SLOT", uint256(3)))
             })
         );
 

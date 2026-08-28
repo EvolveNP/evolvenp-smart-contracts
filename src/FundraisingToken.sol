@@ -15,7 +15,7 @@ contract FundraisingToken is ERC20 {
      */
     error ZeroAddress();
     error ZeroAmount();
-    error OnlyTreasury();
+    error OnlyVault();
     error SameAddress();
 
     /**
@@ -78,5 +78,15 @@ contract FundraisingToken is ERC20 {
      */
     function decimals() public view virtual override returns (uint8) {
         return _decimals;
+    }
+
+    /**
+     * @notice Burns fundraising tokens held by the vault.
+     * @dev Only the configured vault may call this, keeping burn execution tied to protocol event logic.
+     * @param amount Amount of tokens to burn from the vault balance.
+     */
+    function burnFromVault(uint256 amount) external nonZeroAmount(amount) {
+        if (msg.sender != vault) revert OnlyVault();
+        _burn(vault, amount);
     }
 }

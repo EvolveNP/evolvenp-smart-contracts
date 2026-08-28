@@ -12,6 +12,7 @@ import {IHook} from "./interfaces/IHook.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 import {IVRFCoordinatorV2} from "./interfaces/IVRFCoordinatorV2Plus.sol";
+import {IFundraisingToken} from "./interfaces/IFundraisingToken.sol";
 
 /**
  * @title VaultV2
@@ -20,28 +21,41 @@ import {IVRFCoordinatorV2} from "./interfaces/IVRFCoordinatorV2Plus.sol";
  * Step-by-step lifecycle:
  * 1. Anyone calls {startDonationWindow} after the monthly interval has elapsed.
  * 2. The Vault snapshots its fundraising-token balance and requests Chainlink VRF for the first event.
- * 3. Chainlink calls {rawFulfillRandomWords}; the Vault derives and stores the next random execution timestamp.
- * 4. Chainlink Automation or any caller executes the scheduled event once that timestamp is reached.
- * 5. After a successful first event and the minimum spacing, anyone may request VRF for the second event.
- * 6. Each successful execution swaps exactly 1% of the opening snapshot balance and distributes USDC to beneficiaries.
- * 7. If safety/integration checks fail, the event is not consumed and a new VRF request may be made later.
+ * 3. Chainlink calls {rawFulfillRandomWords}; the Vault maps the random word to one slot in the event range.
+ * 4. If the selected slot is the current slot, the callback executes the donation immediately.
+ * 5. If the selected slot is not current, the Vault advances to the next eligible slot without publishing a timestamp.
+ * 6. The final slot in each range executes as a fallback so a valid monthly event cannot be skipped forever.
+ * 7. Preservation reserves (<5%) skip execution to preserve nonprofit funding capacity.
+ * 8. Conservation reserves (<15%) execute fundraising only and keep burn disabled until reserves recover to 20%.
+ * 9. Healthy reserves execute 1% fundraising and burn 1% of the opening snapshot balance per event.
+ * 10. If safety/integration checks fail, the event is not consumed and a new VRF request may be made later.
  *
- * The future timestamp is unknowable until the VRF fulfillment arrives. Once fulfilled, the scheduled timestamp is
- * public like all contract state, and execution remains permissionless after it becomes due.
+ * No future event timestamp is stored. Randomness is requested sequentially per eligible slot, and execution happens
+ * during the VRF callback only when the random slot selection matches the requested slot.
  */
 contract VaultV2 is Swap {
     using SafeERC20 for IERC20;
 
-    /// @notice Fixed length of the randomized event-selection window.
-    uint256 public constant DONATION_WINDOW = 7 days;
+    /// @notice Fixed length of the randomized monthly event-selection window.
+    uint256 public constant DONATION_WINDOW = 30 days;
     /// @notice Number of donation tranches required per window.
     uint8 public constant EVENTS_PER_WINDOW = 2;
-    /// @notice Each tranche swaps 1% of the Vault balance snapshotted at window start.
-    uint256 public constant TRANCHE_PERCENTAGE = 1e16;
+    /// @notice Each fundraising tranche swaps 1% of the Vault balance snapshotted at window start.
+    uint256 public constant FUNDRAISING_PERCENTAGE = 1e16;
+    /// @notice Healthy-mode burn amount is 1% of the Vault balance snapshotted at window start.
+    uint256 public constant BURN_PERCENTAGE = 1e16;
+    /// @notice Treasury reserve percentage below which events preserve the remaining treasury balance.
+    uint256 public constant PRESERVATION_TREASURY_THRESHOLD = 5e16;
+    /// @notice Treasury reserve percentage needed to resume fundraising after preservation mode.
+    uint256 public constant PRESERVATION_RECOVERY_THRESHOLD = 10e16;
+    /// @notice Treasury reserve percentage below which events execute fundraising without burning.
+    uint256 public constant CONSERVATION_TREASURY_THRESHOLD = 15e16;
+    /// @notice Treasury reserve percentage needed to resume healthy-mode burning after conservation mode.
+    uint256 public constant CONSERVATION_RECOVERY_THRESHOLD = 20e16;
+    /// @notice Backward-compatible alias for the fundraising tranche percentage.
+    uint256 public constant TRANCHE_PERCENTAGE = FUNDRAISING_PERCENTAGE;
     /// @notice Percentage denominator used by {TRANCHE_PERCENTAGE}.
     uint256 public constant PERCENTAGE_DENOMINATOR = 1e18;
-    /// @notice Hard minimum time between the first and second donation event.
-    uint256 public constant MIN_EVENT_SPACING = 2 days;
     /// @notice Oracle observation interval used by the TWAP sell-safety check.
     uint32 public constant oracleObservationInterval = 1800;
     /// @notice Maximum allowed tick deviation between current price and TWAP.
@@ -73,13 +87,19 @@ contract VaultV2 is Swap {
     error UnknownRequest();
     error RandomnessPending();
     error InvalidUpkeepAction();
+    error InvalidSlotConfig();
+    error PreservationTreasuryReserve();
+
+    enum TreasuryMode {
+        PRESERVATION,
+        CONSERVATION,
+        NORMAL
+    }
 
     /// @notice Chainlink Automation action marker for starting a new donation window.
     uint8 internal constant UPKEEP_START_WINDOW = 1;
     /// @notice Chainlink Automation action marker for requesting the next hidden-timing donation event.
     uint8 internal constant UPKEEP_REQUEST_DONATION_EVENT = 2;
-    /// @notice Chainlink Automation action marker for executing a due scheduled donation event.
-    uint8 internal constant UPKEEP_EXECUTE_DONATION_EVENT = 3;
 
     /// @notice Chainlink VRF configuration used to request donation-window randomness.
     struct VrfConfig {
@@ -90,16 +110,25 @@ contract VaultV2 is Swap {
         uint32 callbackGasLimit;
     }
 
+    /// @notice Configurable slot ranges used by sequential VRF donation selection.
+    struct SlotConfig {
+        uint8 slotsPerWindow;
+        uint8 firstEventStartSlot;
+        uint8 firstEventEndSlot;
+        uint8 secondEventStartSlot;
+        uint8 secondEventEndSlot;
+    }
+
     /// @notice Donation-window state for the active or most recently completed cycle.
     struct DonationWindow {
         uint64 cycleId;
         uint64 startsAt;
         uint64 endsAt;
         uint64 lastRequestAt;
-        uint64 scheduledEventAt;
         uint64 lastEventAt;
         uint128 snapshotBalance;
         uint8 eventsExecuted;
+        uint8 nextSlotToRequest;
         bool randomnessPending;
     }
 
@@ -107,6 +136,7 @@ contract VaultV2 is Swap {
     struct DonationRequest {
         uint64 cycleId;
         uint8 eventIndex;
+        uint8 slotIndex;
     }
 
     address public fundraisingToken;
@@ -120,11 +150,17 @@ contract VaultV2 is Swap {
     uint32 public immutable vrfCallbackGasLimit;
     uint256 public immutable intervalSeconds;
     uint256 public immutable minTokenBalanceToExecute;
+    uint8 public immutable slotsPerWindow;
+    uint8 public immutable firstEventStartSlot;
+    uint8 public immutable firstEventEndSlot;
+    uint8 public immutable secondEventStartSlot;
+    uint8 public immutable secondEventEndSlot;
 
     uint256 public lastSuccessAt;
     address public hookAddress;
     address[] public beneficiaries;
     DonationWindow public donationWindow;
+    TreasuryMode public treasuryMode = TreasuryMode.NORMAL;
 
     mapping(uint256 => DonationRequest) public requestById;
 
@@ -155,18 +191,26 @@ contract VaultV2 is Swap {
      * @notice Emitted when VRF schedules the next permissionless donation execution time.
      * @param cycleId Monthly donation cycle id.
      * @param eventIndex One-based tranche index scheduled for execution.
-     * @param scheduledEventAt Random future timestamp selected from the active window.
+     * @param selectedSlot Slot selected by VRF inside the event range.
+     * @param requestedSlot Slot for which the VRF request was made.
+     * @param executed True when the donation executed during this callback.
      */
-    event DonationEventScheduled(uint64 indexed cycleId, uint8 indexed eventIndex, uint64 scheduledEventAt);
+    event DonationSlotEvaluated(
+        uint64 indexed cycleId, uint8 indexed eventIndex, uint8 selectedSlot, uint8 requestedSlot, bool executed
+    );
 
     /**
      * @notice Emitted after a successful tranche swap and distribution.
      * @param cycleId Monthly donation cycle id.
      * @param eventIndex One-based tranche index, either 1 or 2.
-     * @param amountIn Fundraising-token amount swapped.
+     * @param amountIn Fundraising-token amount swapped for beneficiaries.
      * @param amountOut USDC amount distributed to beneficiaries.
      */
     event DonationEventExecuted(uint64 indexed cycleId, uint8 indexed eventIndex, uint256 amountIn, uint256 amountOut);
+    event DonationBurnExecuted(uint64 indexed cycleId, uint8 indexed eventIndex, uint256 burnAmount);
+    event TreasuryModeUpdated(
+        TreasuryMode indexed previousMode, TreasuryMode indexed newMode, uint256 treasuryPercentage
+    );
 
     /**
      * @notice Emitted when USDC proceeds are transferred to a nonprofit beneficiary.
@@ -201,6 +245,7 @@ contract VaultV2 is Swap {
      * @param _minTokenBalanceToExecute Minimum fundraising-token balance required to start a window.
      * @param _factoryAddress Factory allowed to configure the fundraising token and hook.
      * @param _vrfConfig Chainlink VRF request configuration.
+     * @param _slotConfig Slot ranges used to decide which monthly slot may execute each donation event.
      */
     constructor(
         address _underlyingAsset,
@@ -210,7 +255,8 @@ contract VaultV2 is Swap {
         address _emergencyManager,
         uint256 _minTokenBalanceToExecute,
         address _factoryAddress,
-        VrfConfig memory _vrfConfig
+        VrfConfig memory _vrfConfig,
+        SlotConfig memory _slotConfig
     )
         Swap(_integrationRegistry)
         nonZeroAddress(_underlyingAsset)
@@ -223,6 +269,7 @@ contract VaultV2 is Swap {
         if (_vrfConfig.requestConfirmations == 0) revert InvalidVrfConfig();
         if (_vrfConfig.callbackGasLimit == 0) revert InvalidVrfConfig();
         _validateBeneficiaries(_beneficiaries);
+        _validateSlotConfig(_slotConfig);
 
         underlyingAsset = _underlyingAsset;
         intervalSeconds = _intervalSeconds;
@@ -235,6 +282,11 @@ contract VaultV2 is Swap {
         vrfSubscriptionId = _vrfConfig.subscriptionId;
         vrfRequestConfirmations = _vrfConfig.requestConfirmations;
         vrfCallbackGasLimit = _vrfConfig.callbackGasLimit;
+        slotsPerWindow = _slotConfig.slotsPerWindow;
+        firstEventStartSlot = _slotConfig.firstEventStartSlot;
+        firstEventEndSlot = _slotConfig.firstEventEndSlot;
+        secondEventStartSlot = _slotConfig.secondEventStartSlot;
+        secondEventEndSlot = _slotConfig.secondEventEndSlot;
         lastSuccessAt = block.timestamp;
     }
 
@@ -254,6 +306,7 @@ contract VaultV2 is Swap {
         uint256 balance = IERC20(fundraisingToken).balanceOf(address(this));
         if (balance < minTokenBalanceToExecute) revert InsufficientBalance();
         if (balance > type(uint128).max) revert InsufficientBalance();
+        if (_refreshTreasuryMode() == TreasuryMode.PRESERVATION) revert PreservationTreasuryReserve();
         _getPoolKey();
 
         uint64 cycleId = donationWindow.cycleId + 1;
@@ -265,13 +318,13 @@ contract VaultV2 is Swap {
             startsAt: startsAt,
             endsAt: endsAt,
             lastRequestAt: 0,
-            scheduledEventAt: 0,
             lastEventAt: 0,
             snapshotBalance: uint128(balance),
             eventsExecuted: 0,
+            nextSlotToRequest: firstEventStartSlot,
             randomnessPending: false
         });
-        requestId = _requestDonationRandomness(1);
+        requestId = _requestDonationRandomness(1, firstEventStartSlot);
 
         emit DonationWindowStarted(cycleId, requestId, startsAt, endsAt, uint128(balance));
     }
@@ -292,26 +345,17 @@ contract VaultV2 is Swap {
     }
 
     /**
-     * @notice Executes the currently scheduled donation event once its random timestamp is due.
-     * @dev Permissionless execution path used by Chainlink Automation and direct callers.
-     */
-    function executeDonationEvent() public {
-        if (!canExecuteDonationEvent()) revert EventNotEligible();
-        donationWindow.scheduledEventAt = 0;
-        _executeDonationEvent();
-    }
-
-    /**
      * @notice Requests Chainlink VRF for the next eligible donation attempt.
-     * @dev A successful first event must be followed by {MIN_EVENT_SPACING} before requesting the second event.
+     * @dev Each request is bound to the current eligible slot for the next donation event.
      * @return requestId Chainlink VRF request id for the donation attempt.
      */
     function requestDonationEvent() public returns (uint256 requestId) {
         IEmergencyManager manager = IEmergencyManager(emergencyManager);
         if (manager.isEmergencyActive()) revert EmegerncyIsActive();
+        _refreshTreasuryMode();
         if (!_canRequestDonationEvent()) revert EventNotEligible();
 
-        requestId = _requestDonationRandomness(donationWindow.eventsExecuted + 1);
+        requestId = _requestDonationRandomness(donationWindow.eventsExecuted + 1, donationWindow.nextSlotToRequest);
     }
 
     /**
@@ -319,7 +363,6 @@ contract VaultV2 is Swap {
      * @dev
      * Returns encoded perform data for exactly one permissionless action:
      * - `UPKEEP_START_WINDOW` when a monthly window is due.
-     * - `UPKEEP_EXECUTE_DONATION_EVENT` when a scheduled donation timestamp is due.
      * - `UPKEEP_REQUEST_DONATION_EVENT` when the next hidden-timing VRF request is eligible.
      * @return upkeepNeeded True when Chainlink Automation should call {performUpkeep}.
      * @return performData ABI-encoded upkeep action id.
@@ -327,9 +370,6 @@ contract VaultV2 is Swap {
     function checkUpkeep(bytes calldata) external view returns (bool upkeepNeeded, bytes memory performData) {
         if (canStartDonationWindow()) {
             return (true, abi.encode(UPKEEP_START_WINDOW));
-        }
-        if (canExecuteDonationEvent()) {
-            return (true, abi.encode(UPKEEP_EXECUTE_DONATION_EVENT));
         }
         if (_canRequestDonationEvent()) {
             return (true, abi.encode(UPKEEP_REQUEST_DONATION_EVENT));
@@ -354,31 +394,36 @@ contract VaultV2 is Swap {
             requestDonationEvent();
             return;
         }
-        if (action == UPKEEP_EXECUTE_DONATION_EVENT) {
-            executeDonationEvent();
-            return;
-        }
         revert InvalidUpkeepAction();
     }
 
     /**
-     * @notice Executes the next eligible 1% donation event.
+     * @notice Executes the next eligible donation event according to treasury health.
      * @dev Safety failures do not consume the event; only a successful swap/distribution increments the event count.
      */
-    function _executeDonationEvent() internal {
+    function _executeDonationEvent() internal returns (bool success) {
         IEmergencyManager manager = IEmergencyManager(emergencyManager);
         if (manager.isEmergencyActive()) {
             emit DonationExecutionFailed(EmegerncyIsActive.selector);
-            return;
+            return false;
         }
+        TreasuryMode activeTreasuryMode = _refreshTreasuryMode();
+        if (activeTreasuryMode == TreasuryMode.PRESERVATION) {
+            emit DonationExecutionFailed(PreservationTreasuryReserve.selector);
+            return false;
+        }
+
         uint256 amountIn = _trancheAmountIn();
         if (amountIn == 0) {
             emit DonationExecutionFailed(ZeroSwapAmount.selector);
-            return;
+            return false;
         }
-        if (IERC20(fundraisingToken).balanceOf(address(this)) < amountIn) {
+
+        uint256 burnAmount = activeTreasuryMode == TreasuryMode.NORMAL ? _burnAmountIn() : 0;
+        uint256 requiredBalance = amountIn + burnAmount;
+        if (IERC20(fundraisingToken).balanceOf(address(this)) < requiredBalance) {
             emit DonationExecutionFailed(InsufficientBalance.selector);
-            return;
+            return false;
         }
 
         (bool sellCheckSucceeded, bytes memory sellCheckResult) =
@@ -386,12 +431,12 @@ contract VaultV2 is Swap {
         if (!sellCheckSucceeded) {
             _tryRecordEndpointFailure(manager);
             emit DonationExecutionFailed(SellCheckFailed.selector);
-            return;
+            return false;
         }
         bool shouldSell = abi.decode(sellCheckResult, (bool));
         if (!shouldSell) {
             emit DonationExecutionFailed(UnsafePrice.selector);
-            return;
+            return false;
         }
 
         (bool quoteSucceeded, bytes memory quoteResult) =
@@ -399,7 +444,7 @@ contract VaultV2 is Swap {
         if (!quoteSucceeded) {
             manager.recordQuoteFailure();
             emit DonationExecutionFailed(QuoteFailed.selector);
-            return;
+            return false;
         }
         uint256 minAmountOut = abi.decode(quoteResult, (uint256));
         manager.recordQuoteSuccess();
@@ -409,11 +454,12 @@ contract VaultV2 is Swap {
         if (!swapSucceeded) {
             manager.recordSwapFailure();
             emit DonationExecutionFailed(SwapFailed.selector);
-            return;
+            return false;
         }
         uint256 amountOut = abi.decode(swapResult, (uint256));
         manager.recordSwapSuccess();
-        _finalizeSuccessfulDonation(amountIn, amountOut);
+        _finalizeSuccessfulDonation(amountIn, amountOut, burnAmount);
+        return true;
     }
 
     /**
@@ -433,8 +479,8 @@ contract VaultV2 is Swap {
      * @notice Returns true when the next randomized donation event is scheduled and due.
      * @dev Useful for Chainlink Automation and permissionless callers.
      */
-    function canExecuteDonationEvent() public view returns (bool) {
-        return _canExecuteScheduledDonationEvent();
+    function canExecuteDonationEvent() public pure returns (bool) {
+        return false;
     }
 
     /**
@@ -445,28 +491,15 @@ contract VaultV2 is Swap {
         DonationWindow memory window = donationWindow;
         if (!_hasIncompleteWindow()) return false;
         if (window.randomnessPending) return false;
-        if (window.scheduledEventAt != 0) return false;
         if (IEmergencyManager(emergencyManager).isEmergencyActive()) return false;
         uint256 amountIn = _trancheAmountIn();
         if (amountIn == 0) return false;
-        if (IERC20(fundraisingToken).balanceOf(address(this)) < amountIn) return false;
-        if (window.eventsExecuted == 0) return true;
-        return block.timestamp >= window.lastEventAt + MIN_EVENT_SPACING;
-    }
-
-    /**
-     * @notice Returns true when the stored random execution timestamp has arrived.
-     * @dev Uses non-reverting checks so Automation simulation cannot be griefed by tiny balances.
-     */
-    function _canExecuteScheduledDonationEvent() internal view returns (bool) {
-        DonationWindow memory window = donationWindow;
-        if (!_hasIncompleteWindow()) return false;
-        if (window.randomnessPending) return false;
-        if (window.scheduledEventAt == 0 || block.timestamp < window.scheduledEventAt) return false;
-        if (IEmergencyManager(emergencyManager).isEmergencyActive()) return false;
-        uint256 amountIn = _trancheAmountIn();
-        if (amountIn == 0) return false;
-        return IERC20(fundraisingToken).balanceOf(address(this)) >= amountIn;
+        TreasuryMode activeTreasuryMode = currentTreasuryMode();
+        if (activeTreasuryMode == TreasuryMode.PRESERVATION) return false;
+        uint256 requiredBalance = amountIn + (activeTreasuryMode == TreasuryMode.NORMAL ? _burnAmountIn() : 0);
+        if (IERC20(fundraisingToken).balanceOf(address(this)) < requiredBalance) return false;
+        return _currentSlot() >= window.nextSlotToRequest
+            && _slotInEventRange(window.eventsExecuted + 1, window.nextSlotToRequest);
     }
 
     /**
@@ -543,8 +576,8 @@ contract VaultV2 is Swap {
     }
 
     /**
-     * @notice Consumes a VRF fulfillment and schedules the requested donation event timestamp.
-     * @dev The selected timestamp is public after fulfillment but unknowable before Chainlink returns randomness.
+     * @notice Consumes a VRF fulfillment and evaluates whether the requested slot should execute.
+     * @dev No future timestamp is stored; missed slots simply advance the cursor to the next slot in range.
      * @param request Pending donation request metadata.
      * @param randomWords Chainlink VRF random words.
      */
@@ -552,44 +585,54 @@ contract VaultV2 is Swap {
         if (!_hasIncompleteWindow()) revert WindowNotActive();
         if (request.eventIndex != donationWindow.eventsExecuted + 1) revert UnknownRequest();
         if (randomWords.length < 2) revert InvalidVrfConfig();
+        if (request.slotIndex != donationWindow.nextSlotToRequest) revert UnknownRequest();
+        if (!_slotInEventRange(request.eventIndex, request.slotIndex)) revert UnknownRequest();
 
-        uint64 scheduledEventAt = _selectDonationTimestamp(request, randomWords);
-        donationWindow.scheduledEventAt = scheduledEventAt;
-        emit DonationEventScheduled(request.cycleId, request.eventIndex, scheduledEventAt);
-    }
+        (uint8 startSlot, uint8 endSlot) = _eventSlotRange(request.eventIndex);
+        uint8 selectedSlot = _selectDonationSlot(startSlot, endSlot, request, randomWords);
+        bool shouldExecute = selectedSlot == request.slotIndex || request.slotIndex == endSlot;
+        bool executed;
 
-    /**
-     * @notice Derives a random future execution timestamp from Chainlink VRF words.
-     * @dev The first event leaves {MIN_EVENT_SPACING} room for the second event inside the window when possible.
-     * @param request Pending donation request metadata.
-     * @param randomWords Chainlink VRF random words.
-     * @return scheduledEventAt Timestamp at which the event becomes executable.
-     */
-    function _selectDonationTimestamp(DonationRequest memory request, uint256[] calldata randomWords)
-        internal
-        view
-        returns (uint64 scheduledEventAt)
-    {
-        DonationWindow memory window = donationWindow;
-        uint256 earliest = block.timestamp;
-        if (request.eventIndex == 1 && earliest < window.startsAt) earliest = window.startsAt;
-        if (request.eventIndex > 1) {
-            uint256 minSecondEventAt = uint256(window.lastEventAt) + MIN_EVENT_SPACING;
-            if (earliest < minSecondEventAt) earliest = minSecondEventAt;
+        if (shouldExecute) {
+            executed = _executeDonationEvent();
+            if (executed && donationWindow.eventsExecuted < EVENTS_PER_WINDOW) {
+                donationWindow.nextSlotToRequest = secondEventStartSlot;
+            }
         }
 
-        uint256 latest = window.endsAt;
-        if (request.eventIndex == 1 && latest > MIN_EVENT_SPACING) latest -= MIN_EVENT_SPACING;
+        if (!executed) {
+            if (request.slotIndex < endSlot && !shouldExecute) {
+                donationWindow.nextSlotToRequest = request.slotIndex + 1;
+            }
+        }
 
-        if (latest <= earliest) return uint64(earliest);
-
-        uint256 seed = uint256(keccak256(abi.encode(randomWords[0], randomWords[1], request.cycleId, request.eventIndex)));
-        scheduledEventAt = uint64(earliest + (seed % (latest - earliest + 1)));
+        emit DonationSlotEvaluated(request.cycleId, request.eventIndex, selectedSlot, request.slotIndex, executed);
     }
 
     /**
-     * @notice Returns the fixed tranche amount for the current donation window.
-     * @dev Uses the opening snapshot so both events are exactly 1% of the same balance.
+     * @notice Derives the slot selected by Chainlink VRF inside an event's configured range.
+     * @dev A request in the final slot executes regardless of this value to guarantee progress.
+     * @param startSlot First slot in the event range.
+     * @param endSlot Final slot in the event range.
+     * @param request Pending donation request metadata.
+     * @param randomWords Chainlink VRF random words.
+     * @return selectedSlot Slot selected by the VRF seed.
+     */
+    function _selectDonationSlot(
+        uint8 startSlot,
+        uint8 endSlot,
+        DonationRequest memory request,
+        uint256[] calldata randomWords
+    ) internal pure returns (uint8 selectedSlot) {
+        uint256 seed = uint256(
+            keccak256(abi.encode(randomWords[0], randomWords[1], request.cycleId, request.eventIndex))
+        );
+        selectedSlot = uint8(startSlot + (seed % (uint256(endSlot) - startSlot + 1)));
+    }
+
+    /**
+     * @notice Returns the fixed fundraising tranche amount for the current donation window.
+     * @dev Uses the opening snapshot so both events use the same deterministic 1% fundraising amount.
      */
     function _getTrancheAmountIn() internal view returns (uint256 amountIn) {
         amountIn = _trancheAmountIn();
@@ -597,11 +640,19 @@ contract VaultV2 is Swap {
     }
 
     /**
-     * @notice Calculates the current window tranche amount without reverting.
+     * @notice Calculates the current window fundraising tranche amount without reverting.
      * @return amountIn Fundraising-token amount for one donation tranche.
      */
     function _trancheAmountIn() internal view returns (uint256 amountIn) {
-        amountIn = (uint256(donationWindow.snapshotBalance) * TRANCHE_PERCENTAGE) / PERCENTAGE_DENOMINATOR;
+        amountIn = (uint256(donationWindow.snapshotBalance) * FUNDRAISING_PERCENTAGE) / PERCENTAGE_DENOMINATOR;
+    }
+
+    /**
+     * @notice Calculates the healthy-mode burn amount without reverting.
+     * @return amountIn Fundraising-token amount burned in normal mode.
+     */
+    function _burnAmountIn() internal view returns (uint256 amountIn) {
+        amountIn = (uint256(donationWindow.snapshotBalance) * BURN_PERCENTAGE) / PERCENTAGE_DENOMINATOR;
     }
 
     /**
@@ -622,11 +673,12 @@ contract VaultV2 is Swap {
     }
 
     /**
-     * @notice Marks a donation tranche complete after successful swap and distribution.
+     * @notice Marks a donation tranche complete after successful fundraising and optional burn.
      * @param amountIn Fundraising-token amount swapped.
      * @param amountOut USDC amount distributed.
+     * @param burnAmount Fundraising-token amount burned when treasury mode is normal.
      */
-    function _finalizeSuccessfulDonation(uint256 amountIn, uint256 amountOut) internal {
+    function _finalizeSuccessfulDonation(uint256 amountIn, uint256 amountOut, uint256 burnAmount) internal {
         _distributeProceeds(amountOut);
 
         unchecked {
@@ -636,22 +688,123 @@ contract VaultV2 is Swap {
         donationWindow.lastEventAt = uint64(block.timestamp);
 
         emit DonationEventExecuted(donationWindow.cycleId, donationWindow.eventsExecuted, amountIn, amountOut);
+
+        if (burnAmount != 0) {
+            IFundraisingToken(fundraisingToken).burnFromVault(burnAmount);
+            emit DonationBurnExecuted(donationWindow.cycleId, donationWindow.eventsExecuted, burnAmount);
+        }
+        _refreshTreasuryMode();
     }
 
     /**
-     * @notice Requests Chainlink VRF for one donation attempt without publishing the future execution timestamp yet.
+     * @notice Returns the current treasury mode based on vault-held fundraising tokens versus total supply.
+     * @dev Applies immutable recovery bands so burn/fundraising do not flap around reserve thresholds.
+     * @return mode_ Preservation below 5%, conservation below 15% or until 20% recovery, otherwise normal.
+     */
+    function currentTreasuryMode() public view returns (TreasuryMode mode_) {
+        uint256 treasuryPercentage = currentTreasuryPercentage();
+        if (treasuryPercentage < PRESERVATION_TREASURY_THRESHOLD) return TreasuryMode.PRESERVATION;
+
+        TreasuryMode storedMode = treasuryMode;
+        if (storedMode == TreasuryMode.PRESERVATION) {
+            if (treasuryPercentage < PRESERVATION_RECOVERY_THRESHOLD) return TreasuryMode.PRESERVATION;
+            if (treasuryPercentage < CONSERVATION_RECOVERY_THRESHOLD) return TreasuryMode.CONSERVATION;
+            return TreasuryMode.NORMAL;
+        }
+        if (storedMode == TreasuryMode.CONSERVATION) {
+            if (treasuryPercentage < CONSERVATION_RECOVERY_THRESHOLD) return TreasuryMode.CONSERVATION;
+            return TreasuryMode.NORMAL;
+        }
+        if (treasuryPercentage < CONSERVATION_TREASURY_THRESHOLD) return TreasuryMode.CONSERVATION;
+        return TreasuryMode.NORMAL;
+    }
+
+    /**
+     * @notice Returns the vault-held fundraising-token reserve ratio against current total supply.
+     * @dev Returns zero before the fundraising token is configured or when total supply is zero.
+     */
+    function currentTreasuryPercentage() public view returns (uint256 treasuryPercentage) {
+        if (fundraisingToken == address(0)) return 0;
+        uint256 totalSupply = IERC20(fundraisingToken).totalSupply();
+        if (totalSupply == 0) return 0;
+        treasuryPercentage = (IERC20(fundraisingToken).balanceOf(address(this)) * PERCENTAGE_DENOMINATOR) / totalSupply;
+    }
+
+    /**
+     * @notice Synchronizes the stored treasury mode using only live on-chain token balances.
+     * @return newMode The effective treasury mode after applying immutable recovery thresholds.
+     */
+    function syncTreasuryMode() external returns (TreasuryMode newMode) {
+        newMode = _refreshTreasuryMode();
+    }
+
+    /**
+     * @notice Updates stored treasury mode when objective reserve thresholds or recovery bands are crossed.
+     * @return newMode The effective treasury mode.
+     */
+    function _refreshTreasuryMode() internal returns (TreasuryMode newMode) {
+        TreasuryMode previousMode = treasuryMode;
+        uint256 treasuryPercentage = currentTreasuryPercentage();
+        newMode = currentTreasuryMode();
+        if (newMode != previousMode) {
+            treasuryMode = newMode;
+            emit TreasuryModeUpdated(previousMode, newMode, treasuryPercentage);
+        }
+    }
+
+    /**
+     * @notice Requests Chainlink VRF for one donation attempt in a specific slot.
      * @param eventIndex One-based donation event index being requested.
+     * @param slotIndex Slot currently being tested for execution.
      * @return requestId Chainlink VRF request id.
      */
-    function _requestDonationRandomness(uint8 eventIndex) internal returns (uint256 requestId) {
+    function _requestDonationRandomness(uint8 eventIndex, uint8 slotIndex) internal returns (uint256 requestId) {
         if (donationWindow.randomnessPending) revert RandomnessPending();
         requestId = IVRFCoordinatorV2(vrfCoordinator)
             .requestRandomWords(vrfKeyHash, vrfSubscriptionId, vrfRequestConfirmations, vrfCallbackGasLimit, 2);
         donationWindow.randomnessPending = true;
         donationWindow.lastRequestAt = uint64(block.timestamp);
-        requestById[requestId] = DonationRequest({cycleId: donationWindow.cycleId, eventIndex: eventIndex});
+        requestById[requestId] =
+            DonationRequest({cycleId: donationWindow.cycleId, eventIndex: eventIndex, slotIndex: slotIndex});
 
         emit DonationEventRandomnessRequested(donationWindow.cycleId, eventIndex, requestId, uint64(block.timestamp));
+    }
+
+    /**
+     * @notice Returns the current zero-based slot for the active donation window.
+     * @return slotIndex Current slot index capped to the final configured slot.
+     */
+    function _currentSlot() internal view returns (uint8 slotIndex) {
+        DonationWindow memory window = donationWindow;
+        if (block.timestamp <= window.startsAt) return 0;
+        uint256 elapsed = block.timestamp - window.startsAt;
+        uint256 slotDuration = DONATION_WINDOW / slotsPerWindow;
+        uint256 slot = elapsed / slotDuration;
+        if (slot >= slotsPerWindow) return slotsPerWindow - 1;
+        return uint8(slot);
+    }
+
+    /**
+     * @notice Returns the configured slot range for a one-based donation event index.
+     * @param eventIndex Donation event index, either 1 or 2.
+     * @return startSlot First allowed slot for the event.
+     * @return endSlot Final allowed slot for the event.
+     */
+    function _eventSlotRange(uint8 eventIndex) internal view returns (uint8 startSlot, uint8 endSlot) {
+        if (eventIndex == 1) return (firstEventStartSlot, firstEventEndSlot);
+        if (eventIndex == 2) return (secondEventStartSlot, secondEventEndSlot);
+        revert WindowComplete();
+    }
+
+    /**
+     * @notice Checks whether a slot belongs to the configured range for an event.
+     * @param eventIndex Donation event index, either 1 or 2.
+     * @param slotIndex Slot to validate.
+     * @return True when the slot is in the event's configured range.
+     */
+    function _slotInEventRange(uint8 eventIndex, uint8 slotIndex) internal view returns (bool) {
+        (uint8 startSlot, uint8 endSlot) = _eventSlotRange(eventIndex);
+        return slotIndex >= startSlot && slotIndex <= endSlot;
     }
 
     /**
@@ -681,6 +834,20 @@ contract VaultV2 is Swap {
     }
 
     /**
+     * @notice Validates the immutable donation slot configuration.
+     * @dev Event ranges must be ordered, non-overlapping, and contained within the monthly slot count.
+     * @param config Slot configuration to validate.
+     */
+    function _validateSlotConfig(SlotConfig memory config) internal pure {
+        if (config.slotsPerWindow == 0) revert InvalidSlotConfig();
+        if (DONATION_WINDOW % config.slotsPerWindow != 0) revert InvalidSlotConfig();
+        if (config.firstEventStartSlot > config.firstEventEndSlot) revert InvalidSlotConfig();
+        if (config.secondEventStartSlot > config.secondEventEndSlot) revert InvalidSlotConfig();
+        if (config.firstEventEndSlot >= config.secondEventStartSlot) revert InvalidSlotConfig();
+        if (config.secondEventEndSlot >= config.slotsPerWindow) revert InvalidSlotConfig();
+    }
+
+    /**
      * @notice Loads and validates the canonical Uniswap V4 pool key for the fundraising token.
      * @return key Factory-registered pool key.
      * @return isCurrency0FundraisingToken True if fundraising token is pool currency0.
@@ -701,6 +868,7 @@ contract VaultV2 is Swap {
      * @dev The cycle intentionally remains incomplete after `endsAt` if safety checks delayed execution.
      */
     function _hasIncompleteWindow() internal view returns (bool) {
-        return donationWindow.startsAt != 0 && donationWindow.eventsExecuted < EVENTS_PER_WINDOW;
+        return donationWindow.startsAt != 0 && block.timestamp <= donationWindow.endsAt
+            && donationWindow.eventsExecuted < EVENTS_PER_WINDOW;
     }
 }

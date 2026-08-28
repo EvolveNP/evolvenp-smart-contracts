@@ -120,7 +120,7 @@ contract MockFactoryRegistry {
 
 contract FactoryHarness is Factory {
     constructor(address registry, address emergencyManager, address usdc, VaultV2.VrfConfig memory vrfConfig)
-        Factory(registry, emergencyManager, usdc, vrfConfig)
+        Factory(registry, emergencyManager, usdc, vrfConfig, _slotConfig())
     {}
 
     function exposedGetModifyLiqiuidityParams(
@@ -130,6 +130,16 @@ contract FactoryHarness is Factory {
         uint160 startingPrice
     ) external view returns (bytes memory) {
         return getModifyLiqiuidityParams(key, amount0, amount1, startingPrice);
+    }
+
+    function _slotConfig() internal pure returns (VaultV2.SlotConfig memory) {
+        return VaultV2.SlotConfig({
+            slotsPerWindow: 4,
+            firstEventStartSlot: 0,
+            firstEventEndSlot: 1,
+            secondEventStartSlot: 2,
+            secondEventEndSlot: 3
+        });
     }
 }
 

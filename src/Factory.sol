@@ -40,6 +40,11 @@ contract Factory is IFactory, Ownable {
     uint64 public immutable vrfSubscriptionId;
     uint16 public immutable vrfRequestConfirmations;
     uint32 public immutable vrfCallbackGasLimit;
+    uint8 public immutable slotsPerWindow;
+    uint8 public immutable firstEventStartSlot;
+    uint8 public immutable firstEventEndSlot;
+    uint8 public immutable secondEventStartSlot;
+    uint8 public immutable secondEventEndSlot;
 
     /**
      * @notice Mapping storing fundraising protocol details by non-profit owner address.
@@ -75,14 +80,14 @@ contract Factory is IFactory, Ownable {
         address _registryAddress,
         address _emergencyManagerAddress,
         address _usdcAddress,
-        VaultV2.VrfConfig memory _vrfConfig
-    )
-        Ownable(msg.sender)
-    {
+        VaultV2.VrfConfig memory _vrfConfig,
+        VaultV2.SlotConfig memory _slotConfig
+    ) Ownable(msg.sender) {
         _requireNonZeroAddress(_registryAddress);
         _requireNonZeroAddress(_emergencyManagerAddress);
         _requireNonZeroAddress(_usdcAddress);
         _requireValidVrfConfig(_vrfConfig);
+        _requireValidSlotConfig(_slotConfig);
 
         registryAddress = _registryAddress;
         emergencyManagerAddress = _emergencyManagerAddress;
@@ -92,6 +97,11 @@ contract Factory is IFactory, Ownable {
         vrfSubscriptionId = _vrfConfig.subscriptionId;
         vrfRequestConfirmations = _vrfConfig.requestConfirmations;
         vrfCallbackGasLimit = _vrfConfig.callbackGasLimit;
+        slotsPerWindow = _slotConfig.slotsPerWindow;
+        firstEventStartSlot = _slotConfig.firstEventStartSlot;
+        firstEventEndSlot = _slotConfig.firstEventEndSlot;
+        secondEventStartSlot = _slotConfig.secondEventStartSlot;
+        secondEventEndSlot = _slotConfig.secondEventEndSlot;
     }
 
     function createFundraisingVault(
@@ -126,6 +136,11 @@ contract Factory is IFactory, Ownable {
                 vrfSubscriptionId: vrfSubscriptionId,
                 vrfRequestConfirmations: vrfRequestConfirmations,
                 vrfCallbackGasLimit: vrfCallbackGasLimit,
+                slotsPerWindow: slotsPerWindow,
+                firstEventStartSlot: firstEventStartSlot,
+                firstEventEndSlot: firstEventEndSlot,
+                secondEventStartSlot: secondEventStartSlot,
+                secondEventEndSlot: secondEventEndSlot,
                 totalSupply: _totalSupply,
                 decimals: _decimals
             })
@@ -170,10 +185,7 @@ contract Factory is IFactory, Ownable {
      * @custom:event Emits {LiquidityPoolCreated} with underlying token, fundraising token, and owner.
      */
 
-    function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1)
-        external
-        onlyOwner
-    {
+    function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1) external onlyOwner {
         _requireNonZeroAddress(_fundraisingToken);
         _requireNonZeroAmount(_amount0);
         _requireNonZeroAmount(_amount1);
@@ -342,6 +354,15 @@ contract Factory is IFactory, Ownable {
                 revert(add(reason, 0x20), mload(reason))
             }
         }
+    }
+
+    function _requireValidSlotConfig(VaultV2.SlotConfig memory slotConfig) internal pure {
+        if (slotConfig.slotsPerWindow == 0) revert VaultV2.InvalidSlotConfig();
+        if (30 days % slotConfig.slotsPerWindow != 0) revert VaultV2.InvalidSlotConfig();
+        if (slotConfig.firstEventStartSlot > slotConfig.firstEventEndSlot) revert VaultV2.InvalidSlotConfig();
+        if (slotConfig.secondEventStartSlot > slotConfig.secondEventEndSlot) revert VaultV2.InvalidSlotConfig();
+        if (slotConfig.firstEventEndSlot >= slotConfig.secondEventStartSlot) revert VaultV2.InvalidSlotConfig();
+        if (slotConfig.secondEventEndSlot >= slotConfig.slotsPerWindow) revert VaultV2.InvalidSlotConfig();
     }
 
     function _tryRecordEndpointFailure(IIntegrationRegistry.Endpoint endpoint) internal {

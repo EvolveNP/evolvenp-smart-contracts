@@ -29,6 +29,11 @@ library FactoryLibrary {
         uint64 vrfSubscriptionId;
         uint16 vrfRequestConfirmations;
         uint32 vrfCallbackGasLimit;
+        uint8 slotsPerWindow;
+        uint8 firstEventStartSlot;
+        uint8 firstEventEndSlot;
+        uint8 secondEventStartSlot;
+        uint8 secondEventEndSlot;
         uint256 totalSupply;
         uint8 decimals;
     }
@@ -66,6 +71,13 @@ library FactoryLibrary {
                 subscriptionId: params.vrfSubscriptionId,
                 requestConfirmations: params.vrfRequestConfirmations,
                 callbackGasLimit: params.vrfCallbackGasLimit
+            }),
+            VaultV2.SlotConfig({
+                slotsPerWindow: params.slotsPerWindow,
+                firstEventStartSlot: params.firstEventStartSlot,
+                firstEventEndSlot: params.firstEventEndSlot,
+                secondEventStartSlot: params.secondEventStartSlot,
+                secondEventEndSlot: params.secondEventEndSlot
             })
         );
 
@@ -82,12 +94,11 @@ library FactoryLibrary {
         return (address(vault), address(fundraisingToken));
     }
 
-    function getModifyLiqiuidityParams(
-        PoolKey memory key,
-        uint256 amount0,
-        uint256 amount1,
-        uint160 startingPrice
-    ) external view returns (bytes memory) {
+    function getModifyLiqiuidityParams(PoolKey memory key, uint256 amount0, uint256 amount1, uint160 startingPrice)
+        external
+        view
+        returns (bytes memory)
+    {
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
         bytes[] memory params = new bytes[](2);
 

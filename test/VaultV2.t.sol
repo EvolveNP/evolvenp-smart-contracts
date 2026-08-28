@@ -31,6 +31,10 @@ contract MockV2Token is ERC20 {
     function burn(address from, uint256 amount) external {
         _burn(from, amount);
     }
+
+    function burnFromVault(uint256 amount) external {
+        _burn(msg.sender, amount);
+    }
 }
 
 contract MockV2EmergencyManager {
@@ -251,6 +255,7 @@ contract VaultV2Test is Test {
         uint64 indexed cycleId, uint8 indexed eventIndex, uint8 selectedSlot, uint8 requestedSlot, bool executed
     );
     event DonationEventExecuted(uint64 indexed cycleId, uint8 indexed eventIndex, uint256 amountIn, uint256 amountOut);
+    event DonationBurnExecuted(uint64 indexed cycleId, uint8 indexed eventIndex, uint256 burnAmount);
     event DonationExecutionFailed(bytes4 reason);
 
     uint8 internal constant UPKEEP_START_WINDOW = 1;
@@ -524,11 +529,12 @@ contract VaultV2Test is Test {
         vault.startDonationWindow();
 
         VaultV2 invalidPoolVault = _deployVault(1 days, beneficiaries, 100);
+        MockV2Token invalidPoolFundraisingToken = new MockV2Token("Invalid Pool Fund", "IPF", 6);
         vm.prank(address(factory));
-        invalidPoolVault.setFundraisingToken(address(fundraisingToken));
+        invalidPoolVault.setFundraisingToken(address(invalidPoolFundraisingToken));
         vm.prank(address(factory));
         invalidPoolVault.setHookAddress(address(hook));
-        fundraisingToken.mint(address(invalidPoolVault), 100);
+        invalidPoolFundraisingToken.mint(address(invalidPoolVault), 1_000);
         _setPoolKey(address(0x1111), address(usdc));
         vm.warp(block.timestamp + 1 days + 1);
 
@@ -558,6 +564,8 @@ contract VaultV2Test is Test {
 
         vm.expectEmit(true, true, false, true);
         emit DonationEventExecuted(1, 1, 10, 95);
+        vm.expectEmit(true, true, false, true);
+        emit DonationBurnExecuted(1, 1, 10);
         vm.expectEmit(true, true, true, true);
         emit DonationSlotEvaluated(1, 1, 0, 0, true);
         vrf.fulfill(address(vault), requestId, matchingWord);
@@ -578,6 +586,8 @@ contract VaultV2Test is Test {
         assertEq(usdc.balanceOf(beneficiaryA), 31);
         assertEq(usdc.balanceOf(beneficiaryB), 31);
         assertEq(usdc.balanceOf(beneficiaryC), 33);
+        assertEq(fundraisingToken.balanceOf(address(vault)), 990);
+        assertEq(fundraisingToken.totalSupply(), 990);
         assertFalse(vault.canExecuteDonationEvent());
     }
 
@@ -787,11 +797,134 @@ contract VaultV2Test is Test {
         vrf.fulfill(address(vault), requestId, _wordForSelectedSlot(1, 0));
         vm.warp(block.timestamp + 15 days);
         requestId = vault.requestDonationEvent();
-        fundraisingToken.burn(address(vault), 991);
+        fundraisingToken.burn(address(vault), 975);
         vm.expectEmit(false, false, false, true);
         emit DonationExecutionFailed(VaultV2.InsufficientBalance.selector);
         vrf.fulfill(address(vault), requestId, _wordForSelectedSlot(2, 2));
         assertFalse(vault.canExecuteDonationEvent());
+    }
+
+    function testPreservationTreasuryModeBlocksWindowStart() public {
+        VaultV2 preservationVault = _deployVault(1 days, beneficiaries, 1);
+        vm.prank(address(factory));
+        preservationVault.setFundraisingToken(address(fundraisingToken));
+        vm.prank(address(factory));
+        preservationVault.setHookAddress(address(hook));
+
+        fundraisingToken.mint(address(preservationVault), 40);
+        fundraisingToken.mint(address(0xD00D), 960);
+        vm.warp(block.timestamp + 1 days);
+
+        assertEq(uint8(preservationVault.currentTreasuryMode()), uint8(VaultV2.TreasuryMode.PRESERVATION));
+        vm.expectRevert(VaultV2.PreservationTreasuryReserve.selector);
+        preservationVault.startDonationWindow();
+    }
+
+    function testPreservationTreasuryModeSkipsFundraisingAndBurnInCallback() public {
+        uint256 requestId = _startWindow(1_000);
+        fundraisingToken.mint(address(0xD00D), 20_000);
+
+        assertEq(uint8(vault.currentTreasuryMode()), uint8(VaultV2.TreasuryMode.PRESERVATION));
+        vm.expectEmit(false, false, false, true);
+        emit DonationExecutionFailed(VaultV2.PreservationTreasuryReserve.selector);
+        vrf.fulfill(address(vault), requestId, _wordForSelectedSlot(1, 0));
+
+        (,,,,,, uint8 eventsExecuted,, bool randomnessPending) = vault.donationWindow();
+        assertEq(eventsExecuted, 0);
+        assertFalse(randomnessPending);
+        assertEq(fundraisingToken.balanceOf(address(vault)), 1_000);
+        assertEq(fundraisingToken.totalSupply(), 21_000);
+        assertEq(usdc.balanceOf(beneficiaryA), 0);
+    }
+
+    function testConservationModeExecutesFundraisingOnlyWithoutBurn() public {
+        VaultV2 conservationVault = _deployVault(1 days, beneficiaries, 1);
+        vm.prank(address(factory));
+        conservationVault.setFundraisingToken(address(fundraisingToken));
+        vm.prank(address(factory));
+        conservationVault.setHookAddress(address(hook));
+
+        fundraisingToken.mint(address(conservationVault), 100);
+        fundraisingToken.mint(address(0xD00D), 900);
+        _prepareSuccessfulSwap(95, 95);
+        vm.warp(block.timestamp + 1 days);
+        uint256 requestId = conservationVault.startDonationWindow();
+
+        assertEq(uint8(conservationVault.currentTreasuryMode()), uint8(VaultV2.TreasuryMode.CONSERVATION));
+        vm.expectEmit(true, true, false, true);
+        emit DonationEventExecuted(1, 1, 1, 95);
+        vrf.fulfill(address(conservationVault), requestId, _wordForSelectedSlot(1, 0));
+
+        (,,,,,, uint8 eventsExecuted,, bool randomnessPending) = conservationVault.donationWindow();
+        assertEq(eventsExecuted, 1);
+        assertFalse(randomnessPending);
+        assertEq(fundraisingToken.balanceOf(address(conservationVault)), 100);
+        assertEq(fundraisingToken.totalSupply(), 1_000);
+        assertEq(usdc.balanceOf(beneficiaryA), 31);
+    }
+
+    function testNormalModeExecutesFundraisingAndBurn() public {
+        uint256 requestId = _startWindow(1_000);
+        _prepareSuccessfulSwap(95, 95);
+
+        assertEq(uint8(vault.currentTreasuryMode()), uint8(VaultV2.TreasuryMode.NORMAL));
+        vm.expectEmit(true, true, false, true);
+        emit DonationEventExecuted(1, 1, 10, 95);
+        vm.expectEmit(true, true, false, true);
+        emit DonationBurnExecuted(1, 1, 10);
+        vrf.fulfill(address(vault), requestId, _wordForSelectedSlot(1, 0));
+
+        assertEq(fundraisingToken.balanceOf(address(vault)), 990);
+        assertEq(fundraisingToken.totalSupply(), 990);
+        assertEq(usdc.balanceOf(beneficiaryC), 33);
+    }
+
+    function testTreasuryModeHysteresisRecoveryThresholds() public {
+        VaultV2 hysteresisVault = _deployVault(1 days, beneficiaries, 1);
+        vm.prank(address(factory));
+        hysteresisVault.setFundraisingToken(address(fundraisingToken));
+        vm.prank(address(factory));
+        hysteresisVault.setHookAddress(address(hook));
+
+        fundraisingToken.mint(address(hysteresisVault), 40);
+        fundraisingToken.mint(address(0xD00D), 960);
+        assertEq(uint8(hysteresisVault.syncTreasuryMode()), uint8(VaultV2.TreasuryMode.PRESERVATION));
+
+        fundraisingToken.mint(address(hysteresisVault), 50);
+        assertEq(uint8(hysteresisVault.currentTreasuryMode()), uint8(VaultV2.TreasuryMode.PRESERVATION));
+
+        fundraisingToken.mint(address(hysteresisVault), 20);
+        assertEq(uint8(hysteresisVault.currentTreasuryMode()), uint8(VaultV2.TreasuryMode.CONSERVATION));
+        assertEq(uint8(hysteresisVault.syncTreasuryMode()), uint8(VaultV2.TreasuryMode.CONSERVATION));
+
+        fundraisingToken.mint(address(hysteresisVault), 80);
+        assertEq(uint8(hysteresisVault.currentTreasuryMode()), uint8(VaultV2.TreasuryMode.CONSERVATION));
+
+        fundraisingToken.mint(address(hysteresisVault), 80);
+        assertEq(uint8(hysteresisVault.currentTreasuryMode()), uint8(VaultV2.TreasuryMode.NORMAL));
+    }
+
+    function testExpiredIncompleteWindowCanRestartAfterTreasuryRecovers() public {
+        uint256 requestId = _startWindow(1_000);
+        fundraisingToken.burn(address(vault), 985);
+
+        vm.expectEmit(false, false, false, true);
+        emit DonationExecutionFailed(VaultV2.InsufficientBalance.selector);
+        vrf.fulfill(address(vault), requestId, _wordForSelectedSlot(1, 0));
+
+        vm.warp(block.timestamp + vault.DONATION_WINDOW() + 1);
+        fundraisingToken.mint(address(vault), 1_000);
+
+        assertTrue(vault.canStartDonationWindow());
+        uint256 newRequestId = vault.startDonationWindow();
+        (uint64 cycleId,,,,, uint128 snapshotBalance, uint8 eventsExecuted,, bool randomnessPending) =
+            vault.donationWindow();
+
+        assertEq(cycleId, 2);
+        assertEq(snapshotBalance, 1_015);
+        assertEq(eventsExecuted, 0);
+        assertTrue(randomnessPending);
+        assertEq(newRequestId, 2);
     }
 
     function testEndpointFailureRecordingCanFailWithoutBlockingRetry() public {

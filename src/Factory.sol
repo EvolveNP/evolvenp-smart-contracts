@@ -82,9 +82,7 @@ contract Factory is IFactory, Ownable {
         address _usdcAddress,
         VaultV2.VrfConfig memory _vrfConfig,
         VaultV2.SlotConfig memory _slotConfig
-    )
-        Ownable(msg.sender)
-    {
+    ) Ownable(msg.sender) {
         _requireNonZeroAddress(_registryAddress);
         _requireNonZeroAddress(_emergencyManagerAddress);
         _requireNonZeroAddress(_usdcAddress);
@@ -187,10 +185,7 @@ contract Factory is IFactory, Ownable {
      * @custom:event Emits {LiquidityPoolCreated} with underlying token, fundraising token, and owner.
      */
 
-    function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1)
-        external
-        onlyOwner
-    {
+    function createPool(address _fundraisingToken, uint256 _amount0, uint256 _amount1) external onlyOwner {
         _requireNonZeroAddress(_fundraisingToken);
         _requireNonZeroAmount(_amount0);
         _requireNonZeroAmount(_amount1);

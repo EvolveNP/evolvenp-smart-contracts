@@ -94,12 +94,11 @@ library FactoryLibrary {
         return (address(vault), address(fundraisingToken));
     }
 
-    function getModifyLiqiuidityParams(
-        PoolKey memory key,
-        uint256 amount0,
-        uint256 amount1,
-        uint160 startingPrice
-    ) external view returns (bytes memory) {
+    function getModifyLiqiuidityParams(PoolKey memory key, uint256 amount0, uint256 amount1, uint160 startingPrice)
+        external
+        view
+        returns (bytes memory)
+    {
         bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
         bytes[] memory params = new bytes[](2);
 

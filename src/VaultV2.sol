@@ -12,6 +12,7 @@ import {IHook} from "./interfaces/IHook.sol";
 import {IIntegrationRegistry} from "./interfaces/IIntegrationRegistry.sol";
 import {IEmergencyManager} from "./interfaces/IEmergencyManager.sol";
 import {IVRFCoordinatorV2} from "./interfaces/IVRFCoordinatorV2Plus.sol";
+import {IFundraisingToken} from "./interfaces/IFundraisingToken.sol";
 
 /**
  * @title VaultV2
@@ -24,8 +25,10 @@ import {IVRFCoordinatorV2} from "./interfaces/IVRFCoordinatorV2Plus.sol";
  * 4. If the selected slot is the current slot, the callback executes the donation immediately.
  * 5. If the selected slot is not current, the Vault advances to the next eligible slot without publishing a timestamp.
  * 6. The final slot in each range executes as a fallback so a valid monthly event cannot be skipped forever.
- * 7. Each successful execution swaps exactly 1% of the opening snapshot balance and distributes USDC to beneficiaries.
- * 8. If safety/integration checks fail, the event is not consumed and a new VRF request may be made later.
+ * 7. Preservation reserves (<5%) skip execution to preserve nonprofit funding capacity.
+ * 8. Conservation reserves (<15%) execute fundraising only and keep burn disabled until reserves recover to 20%.
+ * 9. Healthy reserves execute 1% fundraising and burn 1% of the opening snapshot balance per event.
+ * 10. If safety/integration checks fail, the event is not consumed and a new VRF request may be made later.
  *
  * No future event timestamp is stored. Randomness is requested sequentially per eligible slot, and execution happens
  * during the VRF callback only when the random slot selection matches the requested slot.
@@ -37,8 +40,20 @@ contract VaultV2 is Swap {
     uint256 public constant DONATION_WINDOW = 30 days;
     /// @notice Number of donation tranches required per window.
     uint8 public constant EVENTS_PER_WINDOW = 2;
-    /// @notice Each tranche swaps 1% of the Vault balance snapshotted at window start.
-    uint256 public constant TRANCHE_PERCENTAGE = 1e16;
+    /// @notice Each fundraising tranche swaps 1% of the Vault balance snapshotted at window start.
+    uint256 public constant FUNDRAISING_PERCENTAGE = 1e16;
+    /// @notice Healthy-mode burn amount is 1% of the Vault balance snapshotted at window start.
+    uint256 public constant BURN_PERCENTAGE = 1e16;
+    /// @notice Treasury reserve percentage below which events preserve the remaining treasury balance.
+    uint256 public constant PRESERVATION_TREASURY_THRESHOLD = 5e16;
+    /// @notice Treasury reserve percentage needed to resume fundraising after preservation mode.
+    uint256 public constant PRESERVATION_RECOVERY_THRESHOLD = 10e16;
+    /// @notice Treasury reserve percentage below which events execute fundraising without burning.
+    uint256 public constant CONSERVATION_TREASURY_THRESHOLD = 15e16;
+    /// @notice Treasury reserve percentage needed to resume healthy-mode burning after conservation mode.
+    uint256 public constant CONSERVATION_RECOVERY_THRESHOLD = 20e16;
+    /// @notice Backward-compatible alias for the fundraising tranche percentage.
+    uint256 public constant TRANCHE_PERCENTAGE = FUNDRAISING_PERCENTAGE;
     /// @notice Percentage denominator used by {TRANCHE_PERCENTAGE}.
     uint256 public constant PERCENTAGE_DENOMINATOR = 1e18;
     /// @notice Oracle observation interval used by the TWAP sell-safety check.
@@ -73,6 +88,13 @@ contract VaultV2 is Swap {
     error RandomnessPending();
     error InvalidUpkeepAction();
     error InvalidSlotConfig();
+    error PreservationTreasuryReserve();
+
+    enum TreasuryMode {
+        PRESERVATION,
+        CONSERVATION,
+        NORMAL
+    }
 
     /// @notice Chainlink Automation action marker for starting a new donation window.
     uint8 internal constant UPKEEP_START_WINDOW = 1;
@@ -138,6 +160,7 @@ contract VaultV2 is Swap {
     address public hookAddress;
     address[] public beneficiaries;
     DonationWindow public donationWindow;
+    TreasuryMode public treasuryMode = TreasuryMode.NORMAL;
 
     mapping(uint256 => DonationRequest) public requestById;
 
@@ -180,10 +203,14 @@ contract VaultV2 is Swap {
      * @notice Emitted after a successful tranche swap and distribution.
      * @param cycleId Monthly donation cycle id.
      * @param eventIndex One-based tranche index, either 1 or 2.
-     * @param amountIn Fundraising-token amount swapped.
+     * @param amountIn Fundraising-token amount swapped for beneficiaries.
      * @param amountOut USDC amount distributed to beneficiaries.
      */
     event DonationEventExecuted(uint64 indexed cycleId, uint8 indexed eventIndex, uint256 amountIn, uint256 amountOut);
+    event DonationBurnExecuted(uint64 indexed cycleId, uint8 indexed eventIndex, uint256 burnAmount);
+    event TreasuryModeUpdated(
+        TreasuryMode indexed previousMode, TreasuryMode indexed newMode, uint256 treasuryPercentage
+    );
 
     /**
      * @notice Emitted when USDC proceeds are transferred to a nonprofit beneficiary.
@@ -279,6 +306,7 @@ contract VaultV2 is Swap {
         uint256 balance = IERC20(fundraisingToken).balanceOf(address(this));
         if (balance < minTokenBalanceToExecute) revert InsufficientBalance();
         if (balance > type(uint128).max) revert InsufficientBalance();
+        if (_refreshTreasuryMode() == TreasuryMode.PRESERVATION) revert PreservationTreasuryReserve();
         _getPoolKey();
 
         uint64 cycleId = donationWindow.cycleId + 1;
@@ -324,6 +352,7 @@ contract VaultV2 is Swap {
     function requestDonationEvent() public returns (uint256 requestId) {
         IEmergencyManager manager = IEmergencyManager(emergencyManager);
         if (manager.isEmergencyActive()) revert EmegerncyIsActive();
+        _refreshTreasuryMode();
         if (!_canRequestDonationEvent()) revert EventNotEligible();
 
         requestId = _requestDonationRandomness(donationWindow.eventsExecuted + 1, donationWindow.nextSlotToRequest);
@@ -369,7 +398,7 @@ contract VaultV2 is Swap {
     }
 
     /**
-     * @notice Executes the next eligible 1% donation event.
+     * @notice Executes the next eligible donation event according to treasury health.
      * @dev Safety failures do not consume the event; only a successful swap/distribution increments the event count.
      */
     function _executeDonationEvent() internal returns (bool success) {
@@ -378,12 +407,21 @@ contract VaultV2 is Swap {
             emit DonationExecutionFailed(EmegerncyIsActive.selector);
             return false;
         }
+        TreasuryMode activeTreasuryMode = _refreshTreasuryMode();
+        if (activeTreasuryMode == TreasuryMode.PRESERVATION) {
+            emit DonationExecutionFailed(PreservationTreasuryReserve.selector);
+            return false;
+        }
+
         uint256 amountIn = _trancheAmountIn();
         if (amountIn == 0) {
             emit DonationExecutionFailed(ZeroSwapAmount.selector);
             return false;
         }
-        if (IERC20(fundraisingToken).balanceOf(address(this)) < amountIn) {
+
+        uint256 burnAmount = activeTreasuryMode == TreasuryMode.NORMAL ? _burnAmountIn() : 0;
+        uint256 requiredBalance = amountIn + burnAmount;
+        if (IERC20(fundraisingToken).balanceOf(address(this)) < requiredBalance) {
             emit DonationExecutionFailed(InsufficientBalance.selector);
             return false;
         }
@@ -420,7 +458,7 @@ contract VaultV2 is Swap {
         }
         uint256 amountOut = abi.decode(swapResult, (uint256));
         manager.recordSwapSuccess();
-        _finalizeSuccessfulDonation(amountIn, amountOut);
+        _finalizeSuccessfulDonation(amountIn, amountOut, burnAmount);
         return true;
     }
 
@@ -456,8 +494,12 @@ contract VaultV2 is Swap {
         if (IEmergencyManager(emergencyManager).isEmergencyActive()) return false;
         uint256 amountIn = _trancheAmountIn();
         if (amountIn == 0) return false;
-        if (IERC20(fundraisingToken).balanceOf(address(this)) < amountIn) return false;
-        return _currentSlot() >= window.nextSlotToRequest && _slotInEventRange(window.eventsExecuted + 1, window.nextSlotToRequest);
+        TreasuryMode activeTreasuryMode = currentTreasuryMode();
+        if (activeTreasuryMode == TreasuryMode.PRESERVATION) return false;
+        uint256 requiredBalance = amountIn + (activeTreasuryMode == TreasuryMode.NORMAL ? _burnAmountIn() : 0);
+        if (IERC20(fundraisingToken).balanceOf(address(this)) < requiredBalance) return false;
+        return _currentSlot() >= window.nextSlotToRequest
+            && _slotInEventRange(window.eventsExecuted + 1, window.nextSlotToRequest);
     }
 
     /**
@@ -581,18 +623,16 @@ contract VaultV2 is Swap {
         uint8 endSlot,
         DonationRequest memory request,
         uint256[] calldata randomWords
-    )
-        internal
-        pure
-        returns (uint8 selectedSlot)
-    {
-        uint256 seed = uint256(keccak256(abi.encode(randomWords[0], randomWords[1], request.cycleId, request.eventIndex)));
+    ) internal pure returns (uint8 selectedSlot) {
+        uint256 seed = uint256(
+            keccak256(abi.encode(randomWords[0], randomWords[1], request.cycleId, request.eventIndex))
+        );
         selectedSlot = uint8(startSlot + (seed % (uint256(endSlot) - startSlot + 1)));
     }
 
     /**
-     * @notice Returns the fixed tranche amount for the current donation window.
-     * @dev Uses the opening snapshot so both events are exactly 1% of the same balance.
+     * @notice Returns the fixed fundraising tranche amount for the current donation window.
+     * @dev Uses the opening snapshot so both events use the same deterministic 1% fundraising amount.
      */
     function _getTrancheAmountIn() internal view returns (uint256 amountIn) {
         amountIn = _trancheAmountIn();
@@ -600,11 +640,19 @@ contract VaultV2 is Swap {
     }
 
     /**
-     * @notice Calculates the current window tranche amount without reverting.
+     * @notice Calculates the current window fundraising tranche amount without reverting.
      * @return amountIn Fundraising-token amount for one donation tranche.
      */
     function _trancheAmountIn() internal view returns (uint256 amountIn) {
-        amountIn = (uint256(donationWindow.snapshotBalance) * TRANCHE_PERCENTAGE) / PERCENTAGE_DENOMINATOR;
+        amountIn = (uint256(donationWindow.snapshotBalance) * FUNDRAISING_PERCENTAGE) / PERCENTAGE_DENOMINATOR;
+    }
+
+    /**
+     * @notice Calculates the healthy-mode burn amount without reverting.
+     * @return amountIn Fundraising-token amount burned in normal mode.
+     */
+    function _burnAmountIn() internal view returns (uint256 amountIn) {
+        amountIn = (uint256(donationWindow.snapshotBalance) * BURN_PERCENTAGE) / PERCENTAGE_DENOMINATOR;
     }
 
     /**
@@ -625,11 +673,12 @@ contract VaultV2 is Swap {
     }
 
     /**
-     * @notice Marks a donation tranche complete after successful swap and distribution.
+     * @notice Marks a donation tranche complete after successful fundraising and optional burn.
      * @param amountIn Fundraising-token amount swapped.
      * @param amountOut USDC amount distributed.
+     * @param burnAmount Fundraising-token amount burned when treasury mode is normal.
      */
-    function _finalizeSuccessfulDonation(uint256 amountIn, uint256 amountOut) internal {
+    function _finalizeSuccessfulDonation(uint256 amountIn, uint256 amountOut, uint256 burnAmount) internal {
         _distributeProceeds(amountOut);
 
         unchecked {
@@ -639,6 +688,68 @@ contract VaultV2 is Swap {
         donationWindow.lastEventAt = uint64(block.timestamp);
 
         emit DonationEventExecuted(donationWindow.cycleId, donationWindow.eventsExecuted, amountIn, amountOut);
+
+        if (burnAmount != 0) {
+            IFundraisingToken(fundraisingToken).burnFromVault(burnAmount);
+            emit DonationBurnExecuted(donationWindow.cycleId, donationWindow.eventsExecuted, burnAmount);
+        }
+        _refreshTreasuryMode();
+    }
+
+    /**
+     * @notice Returns the current treasury mode based on vault-held fundraising tokens versus total supply.
+     * @dev Applies immutable recovery bands so burn/fundraising do not flap around reserve thresholds.
+     * @return mode_ Preservation below 5%, conservation below 15% or until 20% recovery, otherwise normal.
+     */
+    function currentTreasuryMode() public view returns (TreasuryMode mode_) {
+        uint256 treasuryPercentage = currentTreasuryPercentage();
+        if (treasuryPercentage < PRESERVATION_TREASURY_THRESHOLD) return TreasuryMode.PRESERVATION;
+
+        TreasuryMode storedMode = treasuryMode;
+        if (storedMode == TreasuryMode.PRESERVATION) {
+            if (treasuryPercentage < PRESERVATION_RECOVERY_THRESHOLD) return TreasuryMode.PRESERVATION;
+            if (treasuryPercentage < CONSERVATION_RECOVERY_THRESHOLD) return TreasuryMode.CONSERVATION;
+            return TreasuryMode.NORMAL;
+        }
+        if (storedMode == TreasuryMode.CONSERVATION) {
+            if (treasuryPercentage < CONSERVATION_RECOVERY_THRESHOLD) return TreasuryMode.CONSERVATION;
+            return TreasuryMode.NORMAL;
+        }
+        if (treasuryPercentage < CONSERVATION_TREASURY_THRESHOLD) return TreasuryMode.CONSERVATION;
+        return TreasuryMode.NORMAL;
+    }
+
+    /**
+     * @notice Returns the vault-held fundraising-token reserve ratio against current total supply.
+     * @dev Returns zero before the fundraising token is configured or when total supply is zero.
+     */
+    function currentTreasuryPercentage() public view returns (uint256 treasuryPercentage) {
+        if (fundraisingToken == address(0)) return 0;
+        uint256 totalSupply = IERC20(fundraisingToken).totalSupply();
+        if (totalSupply == 0) return 0;
+        treasuryPercentage = (IERC20(fundraisingToken).balanceOf(address(this)) * PERCENTAGE_DENOMINATOR) / totalSupply;
+    }
+
+    /**
+     * @notice Synchronizes the stored treasury mode using only live on-chain token balances.
+     * @return newMode The effective treasury mode after applying immutable recovery thresholds.
+     */
+    function syncTreasuryMode() external returns (TreasuryMode newMode) {
+        newMode = _refreshTreasuryMode();
+    }
+
+    /**
+     * @notice Updates stored treasury mode when objective reserve thresholds or recovery bands are crossed.
+     * @return newMode The effective treasury mode.
+     */
+    function _refreshTreasuryMode() internal returns (TreasuryMode newMode) {
+        TreasuryMode previousMode = treasuryMode;
+        uint256 treasuryPercentage = currentTreasuryPercentage();
+        newMode = currentTreasuryMode();
+        if (newMode != previousMode) {
+            treasuryMode = newMode;
+            emit TreasuryModeUpdated(previousMode, newMode, treasuryPercentage);
+        }
     }
 
     /**
@@ -757,6 +868,7 @@ contract VaultV2 is Swap {
      * @dev The cycle intentionally remains incomplete after `endsAt` if safety checks delayed execution.
      */
     function _hasIncompleteWindow() internal view returns (bool) {
-        return donationWindow.startsAt != 0 && donationWindow.eventsExecuted < EVENTS_PER_WINDOW;
+        return donationWindow.startsAt != 0 && block.timestamp <= donationWindow.endsAt
+            && donationWindow.eventsExecuted < EVENTS_PER_WINDOW;
     }
 }

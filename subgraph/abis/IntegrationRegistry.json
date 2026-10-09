@@ -1,0 +1,30 @@
+[
+  {
+    "type": "event",
+    "name": "AllowListConfigured",
+    "anonymous": false,
+    "inputs": [
+      { "name": "endpointType", "type": "uint8", "indexed": false },
+      { "name": "allowedAddress", "type": "address", "indexed": false },
+      { "name": "allowed", "type": "bool", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "IntegrationUpdated",
+    "anonymous": false,
+    "inputs": [
+      { "name": "endpointType", "type": "uint8", "indexed": false },
+      { "name": "oldAddress", "type": "address", "indexed": false },
+      { "name": "newAddress", "type": "address", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "HookDeployed",
+    "anonymous": false,
+    "inputs": [
+      { "name": "hookAddress", "type": "address", "indexed": false }
+    ]
+  }
+]

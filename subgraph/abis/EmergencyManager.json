@@ -1,0 +1,43 @@
+[
+  {
+    "type": "event",
+    "name": "EmergencyArmed",
+    "anonymous": false,
+    "inputs": [
+      { "name": "triggerFlags", "type": "uint256", "indexed": false },
+      { "name": "consecutiveQuoteFailures", "type": "uint64", "indexed": false },
+      { "name": "consecutiveSwapFailures", "type": "uint64", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "EmergencyActivated",
+    "anonymous": false,
+    "inputs": [
+      { "name": "expiresAt", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "EmergencyExited",
+    "anonymous": false,
+    "inputs": []
+  },
+  {
+    "type": "event",
+    "name": "ReporterConfigured",
+    "anonymous": false,
+    "inputs": [
+      { "name": "reporter", "type": "address", "indexed": false },
+      { "name": "allowed", "type": "bool", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "EndpointFailureRecorded",
+    "anonymous": false,
+    "inputs": [
+      { "name": "endpoint", "type": "uint8", "indexed": false }
+    ]
+  }
+]

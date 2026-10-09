@@ -1,0 +1,15 @@
+{
+  "network": "sepolia",
+  "Factory": {
+    "address": "0xD2E7f6d5b7f3C25aAcC97849C7eF8d64Cddffa45",
+    "startBlock": 1786712628
+  },
+  "EmergencyManager": {
+    "address": "0xe2D5301c449D14C84f37e929A795bDEF8af19a6b",
+    "startBlock": 1786712628
+  },
+  "IntegrationRegistry": {
+    "address": "0xeec2D22785191f7DEA8454C8bc7f637B2673aaC8",
+    "startBlock": 1786712628
+  }
+}

@@ -11,14 +11,14 @@ export function vaultWindowId(vault: Address, cycleId: BigInt): string {
   return vault.toHexString() + "-" + cycleId.toString();
 }
 
-export function modeName(mode: i32): string {
+export function modeName(mode: number): string {
   if (mode == 0) return "PRESERVATION";
   if (mode == 1) return "CONSERVATION";
   if (mode == 2) return "NORMAL";
   return "UNKNOWN";
 }
 
-export function endpointId(endpoint: i32): string {
+export function endpointId(endpoint: number): string {
   return endpoint.toString();
 }
 

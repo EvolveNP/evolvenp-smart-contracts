@@ -6,9 +6,9 @@
     "prepare:sepolia": "mustache networks/sepolia.json subgraph.template.yaml > subgraph.yaml",
     "codegen": "npm run prepare:sepolia && graph codegen",
     "build:sepolia": "npm run prepare:sepolia && graph build",
-    "deploy:sepolia": "npm run prepare:sepolia && graph deploy evolvenp/evolvenp-sepolia --deploy-key ${DEPLOY_KEY}",
+    "deploy:sepolia": "npm run prepare:sepolia && graph deploy evolve-np-smart-contracts --deploy-key ${DEPLOY_KEY}",
     "build": "graph build",
-    "deploy": "graph deploy evolvenp/evolvenp --deploy-key ${DEPLOY_KEY}"
+    "deploy": "graph deploy evolve-np-smart-contracts --deploy-key ${DEPLOY_KEY}"
   },
   "devDependencies": {
     "@graphprotocol/graph-cli": "^0.97.1",

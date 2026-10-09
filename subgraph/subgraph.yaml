@@ -10,7 +10,7 @@ dataSources:
     source:
       address: "0xD2E7f6d5b7f3C25aAcC97849C7eF8d64Cddffa45"
       abi: Factory
-      startBlock: 1786712628
+      startBlock: 11828634
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9
@@ -36,7 +36,7 @@ dataSources:
     source:
       address: "0xe2D5301c449D14C84f37e929A795bDEF8af19a6b"
       abi: EmergencyManager
-      startBlock: 1786712628
+      startBlock: 11828634
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9
@@ -69,7 +69,7 @@ dataSources:
     source:
       address: "0xeec2D22785191f7DEA8454C8bc7f637B2673aaC8"
       abi: IntegrationRegistry
-      startBlock: 1786712628
+      startBlock: 11828634
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9

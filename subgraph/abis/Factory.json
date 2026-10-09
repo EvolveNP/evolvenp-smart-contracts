@@ -1,0 +1,31 @@
+[
+  {
+    "type": "event",
+    "name": "FundraisingVaultCreated",
+    "anonymous": false,
+    "inputs": [
+      { "name": "fundraisingToken", "type": "address", "indexed": false },
+      { "name": "vault", "type": "address", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "LiquidityPoolCreated",
+    "anonymous": false,
+    "inputs": [
+      { "name": "currency0", "type": "address", "indexed": false },
+      { "name": "currency1", "type": "address", "indexed": false },
+      { "name": "owner", "type": "address", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "PoolCreationFailed",
+    "anonymous": false,
+    "inputs": [
+      { "name": "fundraisingToken", "type": "address", "indexed": false },
+      { "name": "reason", "type": "bytes4", "indexed": false },
+      { "name": "endpoint", "type": "uint8", "indexed": false }
+    ]
+  }
+]

@@ -1,0 +1,130 @@
+specVersion: 1.0.0
+indexerHints:
+  prune: auto
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum
+    name: Factory
+    network: sepolia
+    source:
+      address: "0xD2E7f6d5b7f3C25aAcC97849C7eF8d64Cddffa45"
+      abi: Factory
+      startBlock: 11828634
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - Protocol
+        - LiquidityPool
+        - PoolCreationFailure
+      abis:
+        - name: Factory
+          file: ./abis/Factory.json
+      eventHandlers:
+        - event: FundraisingVaultCreated(address,address)
+          handler: handleFundraisingVaultCreated
+        - event: LiquidityPoolCreated(address,address,address)
+          handler: handleLiquidityPoolCreated
+        - event: PoolCreationFailed(address,bytes4,uint8)
+          handler: handlePoolCreationFailed
+      file: ./src/factory.ts
+  - kind: ethereum
+    name: EmergencyManager
+    network: sepolia
+    source:
+      address: "0xe2D5301c449D14C84f37e929A795bDEF8af19a6b"
+      abi: EmergencyManager
+      startBlock: 11828634
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - EmergencyManagerState
+        - EmergencyArmedEvent
+        - EmergencyActivationEvent
+        - EmergencyExitEvent
+        - ReporterConfiguration
+        - EndpointFailureEvent
+      abis:
+        - name: EmergencyManager
+          file: ./abis/EmergencyManager.json
+      eventHandlers:
+        - event: EmergencyArmed(uint256,uint64,uint64)
+          handler: handleEmergencyArmed
+        - event: EmergencyActivated(uint256)
+          handler: handleEmergencyActivated
+        - event: EmergencyExited()
+          handler: handleEmergencyExited
+        - event: ReporterConfigured(address,bool)
+          handler: handleReporterConfigured
+        - event: EndpointFailureRecorded(uint8)
+          handler: handleEndpointFailureRecorded
+      file: ./src/emergency-manager.ts
+  - kind: ethereum
+    name: IntegrationRegistry
+    network: sepolia
+    source:
+      address: "0xeec2D22785191f7DEA8454C8bc7f637B2673aaC8"
+      abi: IntegrationRegistry
+      startBlock: 11828634
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - IntegrationEndpoint
+        - AllowListConfiguration
+        - HookDeployment
+      abis:
+        - name: IntegrationRegistry
+          file: ./abis/IntegrationRegistry.json
+      eventHandlers:
+        - event: AllowListConfigured(uint8,address,bool)
+          handler: handleAllowListConfigured
+        - event: IntegrationUpdated(uint8,address,address)
+          handler: handleIntegrationUpdated
+        - event: HookDeployed(address)
+          handler: handleHookDeployed
+      file: ./src/integration-registry.ts
+templates:
+  - kind: ethereum/contract
+    name: VaultV2
+    network: sepolia
+    source:
+      abi: VaultV2
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - Vault
+        - DonationWindow
+        - DonationExecution
+        - DonationBurn
+        - BeneficiaryTransfer
+        - DonationFailure
+        - TreasuryModeUpdate
+      abis:
+        - name: VaultV2
+          file: ./abis/VaultV2.json
+      eventHandlers:
+        - event: DonationWindowStarted(indexed uint64,indexed uint256,uint64,uint64,uint128)
+          handler: handleDonationWindowStarted
+        - event: DonationEventRandomnessRequested(indexed uint64,indexed uint8,indexed uint256,uint64)
+          handler: handleDonationEventRandomnessRequested
+        - event: DonationSlotEvaluated(indexed uint64,indexed uint8,uint8,uint8,bool)
+          handler: handleDonationSlotEvaluated
+        - event: DonationEventExecuted(indexed uint64,indexed uint8,uint256,uint256)
+          handler: handleDonationEventExecuted
+        - event: DonationBurnExecuted(indexed uint64,indexed uint8,uint256)
+          handler: handleDonationBurnExecuted
+        - event: TreasuryModeUpdated(indexed uint8,indexed uint8,uint256)
+          handler: handleTreasuryModeUpdated
+        - event: FundsTransferredToNonProfit(address,uint256)
+          handler: handleFundsTransferredToNonProfit
+        - event: DonationExecutionFailed(bytes4)
+          handler: handleDonationExecutionFailed
+      file: ./src/vault-v2.ts

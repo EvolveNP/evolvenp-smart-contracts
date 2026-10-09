@@ -1,0 +1,220 @@
+type Protocol @entity(immutable: false) {
+  id: Bytes!
+  fundraisingToken: Bytes!
+  vault: Vault!
+  factory: Bytes!
+  poolCreated: Boolean!
+  pool: LiquidityPool
+  createdAt: BigInt!
+  createdBlock: BigInt!
+  createdTx: Bytes!
+}
+
+type Vault @entity(immutable: false) {
+  id: Bytes!
+  fundraisingToken: Bytes!
+  protocol: Protocol
+  currentCycleId: BigInt!
+  activeWindow: DonationWindow
+  totalEventsExecuted: BigInt!
+  totalUSDCDistributed: BigInt!
+  totalTokensBurned: BigInt!
+  latestTreasuryMode: String
+  createdAt: BigInt!
+  createdBlock: BigInt!
+  createdTx: Bytes!
+}
+
+type LiquidityPool @entity(immutable: false) {
+  id: ID!
+  protocol: Protocol
+  fundraisingToken: Bytes!
+  currency0: Bytes!
+  currency1: Bytes!
+  owner: Bytes!
+  createdAt: BigInt!
+  createdBlock: BigInt!
+  createdTx: Bytes!
+}
+
+type PoolCreationFailure @entity(immutable: true) {
+  id: ID!
+  fundraisingToken: Bytes!
+  reason: Bytes!
+  endpoint: Int!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type DonationWindow @entity(immutable: false) {
+  id: ID!
+  vault: Vault!
+  cycleId: BigInt!
+  requestId: BigInt!
+  startsAt: BigInt!
+  endsAt: BigInt!
+  snapshotBalance: BigInt!
+  eventsExecuted: BigInt!
+  randomnessRequests: [DonationRandomnessRequest!]! @derivedFrom(field: "window")
+  slotEvaluations: [DonationSlotEvaluation!]! @derivedFrom(field: "window")
+  executions: [DonationExecution!]! @derivedFrom(field: "window")
+}
+
+type DonationRandomnessRequest @entity(immutable: true) {
+  id: ID!
+  vault: Vault!
+  window: DonationWindow!
+  cycleId: BigInt!
+  eventIndex: Int!
+  requestId: BigInt!
+  requestedAt: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type DonationSlotEvaluation @entity(immutable: true) {
+  id: ID!
+  vault: Vault!
+  window: DonationWindow!
+  cycleId: BigInt!
+  eventIndex: Int!
+  selectedSlot: Int!
+  requestedSlot: Int!
+  executed: Boolean!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type DonationExecution @entity(immutable: true) {
+  id: ID!
+  vault: Vault!
+  window: DonationWindow!
+  cycleId: BigInt!
+  eventIndex: Int!
+  amountIn: BigInt!
+  amountOut: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type DonationBurn @entity(immutable: true) {
+  id: ID!
+  vault: Vault!
+  cycleId: BigInt!
+  eventIndex: Int!
+  burnAmount: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type BeneficiaryTransfer @entity(immutable: true) {
+  id: ID!
+  vault: Vault!
+  recipient: Bytes!
+  amount: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type DonationFailure @entity(immutable: true) {
+  id: ID!
+  vault: Vault!
+  window: DonationWindow!
+  reason: Bytes!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type TreasuryModeUpdate @entity(immutable: true) {
+  id: ID!
+  vault: Vault!
+  previousMode: String!
+  newMode: String!
+  treasuryPercentage: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type EmergencyManagerState @entity(immutable: false) {
+  id: ID!
+  armedReasonFlags: BigInt!
+  emergencyActive: Boolean!
+  emergencyExpiresAt: BigInt!
+  lastUpdatedAt: BigInt!
+  lastUpdatedBlock: BigInt!
+}
+
+type EmergencyArmedEvent @entity(immutable: true) {
+  id: ID!
+  triggerFlags: BigInt!
+  consecutiveQuoteFailures: BigInt!
+  consecutiveSwapFailures: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type EmergencyActivationEvent @entity(immutable: true) {
+  id: ID!
+  expiresAt: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type EmergencyExitEvent @entity(immutable: true) {
+  id: ID!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type ReporterConfiguration @entity(immutable: true) {
+  id: ID!
+  reporter: Bytes!
+  allowed: Boolean!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type EndpointFailureEvent @entity(immutable: true) {
+  id: ID!
+  endpoint: Int!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type IntegrationEndpoint @entity(immutable: false) {
+  id: ID!
+  endpoint: Int!
+  currentAddress: Bytes!
+  updatedAt: BigInt!
+  updatedBlock: BigInt!
+}
+
+type AllowListConfiguration @entity(immutable: true) {
+  id: ID!
+  endpoint: Int!
+  allowedAddress: Bytes!
+  allowed: Boolean!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type HookDeployment @entity(immutable: true) {
+  id: ID!
+  hookAddress: Bytes!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}

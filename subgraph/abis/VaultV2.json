@@ -1,0 +1,85 @@
+[
+  {
+    "type": "event",
+    "name": "DonationWindowStarted",
+    "anonymous": false,
+    "inputs": [
+      { "name": "cycleId", "type": "uint64", "indexed": true },
+      { "name": "requestId", "type": "uint256", "indexed": true },
+      { "name": "startsAt", "type": "uint64", "indexed": false },
+      { "name": "endsAt", "type": "uint64", "indexed": false },
+      { "name": "snapshotBalance", "type": "uint128", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "DonationEventRandomnessRequested",
+    "anonymous": false,
+    "inputs": [
+      { "name": "cycleId", "type": "uint64", "indexed": true },
+      { "name": "eventIndex", "type": "uint8", "indexed": true },
+      { "name": "requestId", "type": "uint256", "indexed": true },
+      { "name": "requestedAt", "type": "uint64", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "DonationSlotEvaluated",
+    "anonymous": false,
+    "inputs": [
+      { "name": "cycleId", "type": "uint64", "indexed": true },
+      { "name": "eventIndex", "type": "uint8", "indexed": true },
+      { "name": "selectedSlot", "type": "uint8", "indexed": false },
+      { "name": "requestedSlot", "type": "uint8", "indexed": false },
+      { "name": "executed", "type": "bool", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "DonationEventExecuted",
+    "anonymous": false,
+    "inputs": [
+      { "name": "cycleId", "type": "uint64", "indexed": true },
+      { "name": "eventIndex", "type": "uint8", "indexed": true },
+      { "name": "amountIn", "type": "uint256", "indexed": false },
+      { "name": "amountOut", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "DonationBurnExecuted",
+    "anonymous": false,
+    "inputs": [
+      { "name": "cycleId", "type": "uint64", "indexed": true },
+      { "name": "eventIndex", "type": "uint8", "indexed": true },
+      { "name": "burnAmount", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "TreasuryModeUpdated",
+    "anonymous": false,
+    "inputs": [
+      { "name": "previousMode", "type": "uint8", "indexed": true },
+      { "name": "newMode", "type": "uint8", "indexed": true },
+      { "name": "treasuryPercentage", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "FundsTransferredToNonProfit",
+    "anonymous": false,
+    "inputs": [
+      { "name": "recipient", "type": "address", "indexed": false },
+      { "name": "amount", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "DonationExecutionFailed",
+    "anonymous": false,
+    "inputs": [
+      { "name": "reason", "type": "bytes4", "indexed": false }
+    ]
+  }
+]
